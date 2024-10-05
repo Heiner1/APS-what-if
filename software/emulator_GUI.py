@@ -11,14 +11,14 @@ from tkinter import ttk
 from tkinter import filedialog
 from tkinter import messagebox
 
-from vary_settings_core import parameters_known
-from vary_settings_core import set_tty
-from vary_settings_core import log_msg, sub_issue
+from emulator_core import parameters_known
+from emulator_core import set_tty
+from emulator_core import log_msg, sub_issue
 
-from vary_settings_core import get_version_core
+from emulator_core import get_version_core
 from determine_basal    import get_version_determine_basal
 def get_version_GUI(echo_msg):
-    echo_msg['vary_settings_GUI.py'] = '2022-10-03 00:54'
+    echo_msg['emulator_GUI.py'] = '2024-04-25 16:24'
     return echo_msg
 
 
@@ -318,7 +318,7 @@ def radioAll():
     optHeader.set("\n                                                                                       ")                
     raw.set('All')
     doit.delete('1.0', 'end')
-    doit.insert('end', 'All')
+    doit.insert('end', 'All/'+useLIST.get())
     flowframe.grid_remove()
     glucframe.grid_remove()
     isf_frame.grid_remove()
@@ -336,13 +336,14 @@ def radioMost():
     isf_frame.grid()
     flowframe.grid()
     noframe.grid_remove()
-    doit.insert('end', 'All/-pred/-flowchart')
+    doit.insert('end', 'All/-pred/-flowchart/'+useLIST.get())
     optionLabels('Hide')
 
 def radioSome():
     optHeader.set("\nFine grained selection of items to be included")                
     raw.set('some')
     doit.delete('1.0', 'end')
+    doit.insert('end', useLIST.get())
     clearchecks()
     insuframe.grid()
     glucframe.grid()
@@ -495,6 +496,32 @@ useflow = StringVar()
 chkflow = ttk.Checkbutton(flowframe, text='Create flowchart', \
             command=useflowChanged, variable=useflow, onvalue='on', offvalue='off')
 chkflow.grid(column=0, row=1, columnspan=2, sticky=(W), padx=5)
+
+#   suppress interactive listing     ---------------------------------------------
+
+def actLIST(what):
+    global doit
+    txt = doit.get('1.0', 'end')[:-1]
+    #addornot = raw.get()
+    wo = txt.find(what[1:])                                                     # w/o potential "-" sign
+    if wo>=0:
+        if what[0] == '-':
+            txt = txt[:wo] + '-' + txt[wo:]                                     # inserted the "-" sign
+        else:
+            txt = txt[:wo-2]     + txt[wo-1:]                                   # take out the "-" sign
+    else:
+        if len(txt) > 0:    txt += '/'
+        txt += what
+    doit.delete('1.0', 'end')
+    doit.insert('end', txt)                                                     # update displayed content
+    pass
+    
+def useLISTChanged():       actLIST(useLIST.get())
+useLIST = StringVar()
+chkLIST = ttk.Checkbutton(outframe, text='show interactive result listing', \
+            command=useLISTChanged, variable=useLIST, onvalue='LIST', offvalue='-LIST')
+chkLIST.grid(column=3, row=11, columnspan=1, sticky=(W), padx=25)
+useLIST.set('LIST')
 
 #   this selects the decimal symbol
 ttk.Label(outframe, text="\nSelect the decimal symbol for output tables").grid(column=1, row=2, columnspan=1, padx=5, sticky=(W))
@@ -780,7 +807,7 @@ def sub_emul():
         runframe.update()                                                       # update frame display
         #kick_off(afil.get(), gopt, variant, useStart, useStopp)
         entries = {}
-        thisTime, extraSMB, CarbReqGram, CarbReqTime, lastCOB, fn_first = parameters_known(afil.get(), gopt, vfil.get(), useStart, useStopp, entries, m, my_decimal)
+        loopInterval, thisTime, extraSMB, CarbReqGram, CarbReqTime, lastCOB, fn_first = parameters_known(afil.get(), gopt, vfil.get(), useStart, useStopp, entries, m, my_decimal)
         if thisTime == 'SYNTAX':
             runState.set('Emulation halted ... ')
             ttk.Label(runframe, textvariable=runState, style='Error.TLabel').grid(column=2, row=runRow, sticky=(W), padx=20, pady=10)
@@ -794,7 +821,7 @@ def sub_emul():
 
             # load result filenames into resframe
             newaf = afil.get()
-            logListe = glob.glob(newaf, recursive=False)                            # the wild card match
+            logListe = glob.glob(newaf, recursive=False)                        # the wild card match
             filecount = 0
             for fn in logListe:
                 #log_msg("checking result file "+fn)
@@ -817,7 +844,7 @@ def sub_emul():
     except:                                                                     # catch *all* exceptions
         #e = sys.exc_info()[0]
         tb = sys.exc_info()[2]
-        sub_issue("Problem in vary_settings_core.py")
+        sub_issue("Problem in emulator_core.py")
         for ele in traceback.format_tb(tb):
             sub_issue(ele[:-1])                                                 # sub appends <CR>
         sub_issue(str(sys.exc_info()[1]))

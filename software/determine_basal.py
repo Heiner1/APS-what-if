@@ -10,7 +10,7 @@ import copy
 #import setTempBasal as tempBasalFunctions
 
 def get_version_determine_basal(echo_msg):
-    echo_msg['determine_basal.py'] = '2022-10-03 00:30'
+    echo_msg['determine_basal.py'] = '2024-06-05 23:50'
     return echo_msg
 
 def round_basal(value, dummy) :
@@ -22,8 +22,7 @@ def round_basal(value, dummy) :
     #function round(value, digits):
     #    if (! digits) { digits = 0; }
     #    var scale = Math.pow(10, digits);
-    return round(value, 4)                  # make it compatible with logfile format
-
+    return round(value, 3)      # make it compatible with logfile format; was 4, as of 3.2.0.2 using 3
 
 #// we expect BG to rise or fall at the rate of BGI,
 #// adjusted by the rate at which BG would need to rise /
@@ -36,8 +35,10 @@ def calculate_expected_delta(target_bg, eventual_bg, bgi):
     return expectedDelta
 
 def convert_bg(value, profile):
-    # while testing all is in mg/dl
-    return round(value)
+    if ('out_units' in profile and profile['out_units'] == "mmol\/L") :     # escape "\" remained part of string
+        return round(value / 18, 1)
+    else:
+        return round(value, 0)
 
 def typeof(thing, *arg):
     # copied to setTempBasal, too !!!
@@ -85,6 +86,14 @@ def short(num):
         return int(num)
     else:
         return num
+
+def long2(num):
+    # emulate apparent java formating if num effectively has no decimals but appends ".00"
+    snum= str(round(num,2))
+    wo = snum.find('.')
+    if wo == -1:             return snum+'.00'      # had 0 decimals
+    if wo == len(snum) -2:   return snum+  '0'      # had 1 decimal
+    return snum                                     # had 2 decimals
 
 def reason(rT, msg) :
   #rT.reason = (rT.reason ? rT.reason + '. ' : '') + msg;
@@ -161,7 +170,7 @@ def enable_smb(profile, microBolusAllowed, meal_data, target_bg, Flows) :
         console_error("SMB disabled (!microBolusAllowed)")
         return False
     elif (not profile['allowSMB_with_high_temptarget'] and profile['temptargetSet'] and target_bg > 100) :
-        console_error("SMB disabled due to high temptarget of",short(target_bg))
+        console_error("SMB disabled due to high temptarget of",convert_bg(target_bg, profile))
         return False
     elif (meal_data['bwFound'] == True and profile['A52_risk_enable'] == False) :
         console_error("SMB disabled due to Bolus Wizard activity in the last 6 hours.")
@@ -203,36 +212,73 @@ def enable_smb(profile, microBolusAllowed, meal_data, target_bg, Flows) :
     console_error("SMB disabled (no enableSMB preferences active or no condition satisfied)")
     return False
 
-def loop_smb(profile, iob_data, Flows):
-    console_error("-->start checking advanced SMB logic---")
-    if (profile['temptargetSet'] and profile['enableSMB_EvenOn_OddOff']) :
+def loop_smb(microBolusAllowed, profile, iob_data, useIobTh, iobThEffective, Flows):
+    if ( not microBolusAllowed ) :
+        return "AAPS"                                                  #// see message in enable_smb
+    gz_proto = 'full_basal_exercise_target' in profile
+    if ( profile['enableSMB_EvenOn_OddOff_always'] ):
         Flows.append(dict(title="SMB settings by full loop logic", indent='0', adr='loop_203'))
-        target = profile['min_bg']
-        if ( target % 2 == 1 ):               # odd number
-            console_error("SMB disabled by even/odd TT logic: odd TT")
-            Flows.append(dict(title="SMB disabled by even/odd TT logic: odd TT", indent='1', adr='loop_207'))
-            console_error("-->end checking advanced SMB logic-----")
-            return "blocked"
-        elif (profile['iob_threshold_percent']/100 < iob_data['iob']/profile['max_iob']/(profile['profile_percentage']/100)) :
-            if (profile['profile_percentage'] != 100) :
-                console_error("Full loop modified max_iob", profile['max_iob'], "to effectively", round(profile['max_iob']*profile['profile_percentage']/100,2), "due to profile percentage")
-                Flows.append(dict(title="Full loop modified max_iob "+str(profile['max_iob'])+" to effectively "+str(round(profile['max_iob']*profile['profile_percentage']/100,2))+" due to profile percentage", indent='1', adr='loop_212'))
-                msg = "effective maxIOB " + str(round(profile['max_iob']*profile['profile_percentage']/100,2))
-            else :
-                msg = "maxIOB "+ str(profile['max_iob'])
-            console_error("SMB disabled by full loop logic: iob "+str(iob_data['iob'])+" is more than "+str(profile['iob_threshold_percent'])+"% of "+msg)
-            Flows.append(dict(title="SMB disabled by full loop logic: iob "+str(iob_data['iob'])+" is more than "+str(profile['iob_threshold_percent'])+"% of "+msg, indent='1', adr='loop_217'))
-            console_error("-->end checking advanced SMB logic-----")
-            return "iobTH"
+        target = convert_bg(profile['target_bg'], profile)
+        #if (profile['temptargetSet']) :
+        #    msgType= "TempTarget "
+        #else :
+        #    msgType = "profile target "
+
+        if ('out_units' in profile and profile['out_units'] == "mmol\/L") :
+            evenTarget = round(target*10, 0) %2 == 0
+            msgUnits   = " has "
+            msgTail    = " decimal"
+        else :
+            evenTarget = target %2 == 0
+            msgUnits   = " is "
+            msgTail    = " number"
+
+        if evenTarget :
+            msgEven    = "even"
         else:
-            console_error("SMB enabled by even/odd TT logic: even TT")
-            Flows.append(dict(title="SMB enabled by even/odd TT logic: even TT", indent='1', adr='loop_221'))
-            console_error("-->end checking advanced SMB logic-----")
-            return "enforced"                   # even number
-    console_error("-->end checking advanced SMB logic-----")
-    return "AAPS"                               # leave it to standard AAPS
+            msgEven    = "odd"
+
+        iobThUser = profile['iob_threshold_percent']
+        if ( useIobTh ) :
+            iobThPercent = round(iobThEffective/profile['max_iob']*100.0, 0)
+            if ( iobThPercent == iobThUser ) :
+                console_error("User setting iobTH="+str(iobThUser)+"% not modulated")
+            else :
+                console_error("User setting iobTH="+str(iobThUser)+"% modulated to "+str(short(round(iobThPercent,2)))+"% or "+str(short(round(iobThEffective,2)))+"U")
+                console_error("due to profile %, exercise mode or similar")
+        else :
+            console_error("User setting iobTH=100% disables iobTH method")
         
-def capInsulin(insulinReq, myTarget, myBg, insulinCap, capFactor, Flows):
+        if not evenTarget:
+            console_error("SMB disabled; current target " +str(target) +msgUnits +msgEven +msgTail)
+            console_error("Loop allows minimal power")
+            return "blocked"
+        elif profile['max_iob']==0:                 # avoid DIV 0! in next if-clause
+            console_error("SMB disabled because of max_iob=0")
+            return "blocked"
+        elif (useIobTh and iobThEffective < iob_data['iob']) :
+            #if (iobTH_reduction_ratio != 1) :
+            #    console_error("Full Loop modified max_iob", profile['max_iob'], "to effectively", round(profile['max_iob']*iobTH_reduction_ratio,2), "due to profile % and/or exercise mode and/or activity")
+            #    Flows.append(dict(title="Full Loop modified max_iob "+str(profile['max_iob'])+" to effectively "+str(round(profile['max_iob']*iobTH_reduction_ratio,2))+" due to profile % and/or exercise mode and/or activity", indent='1', adr='loop_222'))
+            #    msg = "effective maxIOB " + str(round(profile['max_iob']*iobTH_reduction_ratio,2))
+            #else :
+            #    msg = "maxIOB "+ str(short(profile['max_iob']))
+            console_error("SMB disabled by Full Loop logic: iob "+str(iob_data['iob'])+" is above effective iobTH "+str(short(iobThEffective)))
+            Flows.append(dict(title="SMB disabled by Full Loop logic: iob "+str(iob_data['iob'])+" is above effective iobTH "+str(short(iobThEffective)), indent='1', adr='loop_227'))
+            console_error("Loop power level temporarely capped")
+            return "iobTH"
+        else :
+            console_error("SMB enabled; current target " +str(target) +msgUnits +msgEven +msgTail)
+            if (profile['target_bg']<100) :     # indirect asessment; later set it in GUI
+                console_error("Loop allows maximum power")
+                return "fullLoop"                                           # even number            
+            else:
+                console_error("Loop allows medium power")
+                return "enforced"                                           # even number
+    console_error("Loop allows APS opower level")
+    return "AAPS"                                                           # leave it to standard AAPS
+        
+def capInsulin(insulinReq, myTarget, myBg, insulinCap, Flows):
     # if Bg is below Target (especially over night) then reduce insulinReq 
     # this is in case a short rise due to noisy ES signal releases too much insulin and we stay below target all the time
     # mod 4c: allow negative InsReq to get below profile base rate
@@ -240,21 +286,31 @@ def capInsulin(insulinReq, myTarget, myBg, insulinCap, capFactor, Flows):
     if insulinReq>0 and myBg<myTarget and myTarget<95 and insulinCap :
         # do it even without tempTarget, but only below bg of 95                    #### lastets status 26.Jun.2020
         #insulinRed = insulinReq *               pow(myBg / myTarget, 4)            #### gz mod3:  initialy power 2
-        insulinRed = insulinReq * max(0, ( 1 - ( 1 - myBg / myTarget) *capFactor )) #### gz mod4b: weaker near target, stronger further away
+        insulinRed = insulinReq * max(0, ( 1 - ( 1 - myBg / myTarget) *8 ))         #### gz mod4b: weaker near target, stronger further away
         #insulinRed  = insulinReq *        ( 1 - ( 1 - myBg / myTarget) *capFactor )  #### gz mod4c: weaker near target, stronger further away; allow negative
         console_error("gz reduce insulinReq from", insulinReq, " to", insulinRed)
-        Flows.append(dict(title="cap insulinReq\nfrom "+str(insulinReq)+" to "+str(round(insulinRed,2)), indent='+0', adr='cap_162'))
+        Flows.append(dict(title="gz cap insulinReq\nfrom "+str(insulinReq)+" to "+str(round(insulinRed,2)), indent='+0', adr='cap_162'))
         return round(insulinRed, 2)
     else:
         console_error("gz keep insulinReq at", insulinReq)
-        Flows.append(dict(title="keep insulinReq("+str(insulinReq)+")", indent='+0', adr='cap_166'))
+        Flows.append(dict(title="gz keep insulinReq("+str(insulinReq)+")", indent='+0', adr='cap_166'))
         return insulinReq
 
-def interpolate(xdata, profile):    # //, polygon)
+def interpolate(xdata, profile, type):    # //, polygon)
     #// V14: interpolate ISF behaviour based on polygons defining nonlinear functions defined by value pairs for ...
-    #//  ...      <-----  delta  ------->  or  <---------------  glucose  ------------------->
-    polyX = [  2,   7,  12,  16,  20,       50,   60,   80,   90, 100, 110, 150, 180, 200]    #// later, hand it over
-    polyY = [0.0, 0.0, 0.4, 0.7, 0.7,     -0.5, -0.5, -0.3, -0.2, 0.0, 0.0, 0.5, 0.7, 0.7]    #// later, hand it over
+    #//  ...    <---------------  glucose  ------------------->
+    polyX_bg = [  50,   60,   80,   90, 100, 110, 150, 180, 200]    #// later, hand it over
+    polyY_bg = [-0.5, -0.5, -0.3, -0.2, 0.0, 0.0, 0.5, 0.7, 0.7]    #// later, hand it over
+    #//  ...       <-----  delta  ------->  
+    polyX_delta = [  2,   7,  12,  16,  20]                         #// later, hand it over
+    polyY_delta = [0.0, 0.0, 0.4, 0.7, 0.7]                         #// later, hand it over
+    if type == "bg":
+        polyX = polyX_bg
+        polyY = polyY_bg
+    elif type =="delta":
+        polyX = polyX_delta
+        polyY = polyY_delta
+        
     polymax = len(polyX)-1
     step = polyX[0]
     sVal = polyY[0]
@@ -307,26 +363,43 @@ def interpolate(xdata, profile):    # //, polygon)
                 break
             lowVal = sVal
             lowLabl= step
-    if ( xdata>100 )  : newVal = newVal * profile['higher_ISFrange_weight']    #// higher BG range
-    elif ( xdata>40 ) : newVal = newVal * profile['lower_ISFrange_weight']     #// lower BG range, but not delta range
-    else :              newVal = newVal * profile['delta_ISFrange_weight']     #// delta range
+    #print('entered interpol with xdata='+str(xdata), ' target='+str(profile['target_bg']), ' newVal='+str(newVal))
+    if type == "delta": newVal = newVal * profile['delta_ISFrange_weight']     #// delta range
+    elif ( xdata>100 ): newVal = newVal * profile['higher_ISFrange_weight']    #// higher BG range
+    else              : newVal = newVal * profile['lower_ISFrange_weight']     #// lower BG range
     return newVal
 
-def withinISFlimits(liftISF, minISFReduction, maxISFReduction, sensitivityRatio):
+def withinISFlimits(liftISF, minISFReduction, maxISFReduction, sensitivityRatio, origin_sens, profile, high_temptarget_raises_sensitivity, target_bg, normalTarget, stepActivityDetected, stepInactivityDetected):
     #// extracted 17.Mar.2022
     if ( liftISF < minISFReduction ) :                                                                          #// mod V14j
-        console_error("weakest ISF factor", short(round(liftISF,2)), "limited by autoisf_min", minISFReduction) #// mod V14j
+        console_error("weakest autoISF factor", short(round(liftISF,2)), "limited by autoISF_min", minISFReduction) #// mod V14j
         liftISF = minISFReduction                                                                               #// mod V14j
     elif ( liftISF > maxISFReduction ) :                                                                        #// mod V14j
-        console_error("strongest ISF factor",short(round(liftISF,2)),"limited by autoisf_max", maxISFReduction) #// mod V14j
+        console_error("strongest autoISF factor",short(round(liftISF,2)),"limited by autoISF_max", maxISFReduction) #// mod V14j
         liftISF = maxISFReduction                                                                               #// mod V14j
-    if ( liftISF >= 1 ) :           final_ISF = max(liftISF, sensitivityRatio)
-    if ( liftISF <  1 ) :           final_ISF = min(liftISF, sensitivityRatio)
-    console_error("final ISF factor is", str(round(final_ISF,2)))
-    console_error("-->end autoISF-------------------------")
+    final_ISF = 1
+    if ( high_temptarget_raises_sensitivity and profile['temptargetSet'] and target_bg > normalTarget ) :
+        final_ISF = liftISF * sensitivityRatio                  # on top of TT modification
+        origin_sens = " including exercise mode impact"
+    elif ( stepActivityDetected or stepInactivityDetected ) :
+        final_ISF = liftISF * sensitivityRatio                  # on top of activity detection
+        origin_sens = " including (in-)activity detection impact"
+    elif ( liftISF >= 1 ) :
+        final_ISF = max(liftISF, sensitivityRatio)
+        if (liftISF >= sensitivityRatio) :
+            origin_sens = ""                                    #// autoISF dominates
+        else :
+            origin_sens = "from low TT modifier";               #// low TT lowers sensitivity dominates
+    else :
+        final_ISF = min(liftISF, sensitivityRatio)
+        if (liftISF <= sensitivityRatio):       origin_sens = ""
+    console_error("final ISF factor is", str(short(round(final_ISF,2))) + origin_sens)
+    console_error("----------------------------------")
+    console_error("end autoISF")
+    console_error("----------------------------------")
     return final_ISF
 
-def autoISF(sens, target_bg, profile, glucose_status, meal_data, currentTime, autosens_data, sensitivityRatio, new_parameter, Fcasts, Flows, emulAI_ratio): 
+def autoISF(sens, origin_sens, target_bg, profile, glucose_status, meal_data, currentTime, autosens_data, sensitivityRatio, loop_wanted_smb, high_temptarget_raises_sensitivity, normalTarget, stepActivityDetected, stepInactivityDetected, new_parameter, Fcasts, Flows, emulAI_ratio):
     #### gz mod 6: dynamic ISF based on dimensions of 5% band
     #Fcasts['origISF'] = profile['sens']                        # taken from original logfile
     #Fcasts['autoISF'] = sens                                   # as modified by autosense; taken from original logfile
@@ -337,22 +410,23 @@ def autoISF(sens, target_bg, profile, glucose_status, meal_data, currentTime, au
     Fcasts['acceISF'] = 1               #profile['sens']  
     Fcasts['dura_ISF'] = 1              #profile['sens']  
     Fcasts['emulISF'] = sens
-    console_error("-->start autoISF, version 2.2.7--------")
-    #if 'use_autoisf' in profile:                               # version including pp-stuff required
+    
     if not profile['enable_autoISF']:
         console_error("autoISF disabled in Preferences")
-        console_error("-->end autoISF-------------------------")
+        console_error("----------------------------------")
+        console_error("end autoISF")
+        console_error("----------------------------------")
         return sens
-    #new_parameter['autoISF_flat'] = profile['use_autoisf']     # make new menu method the master setting
     dura05 = short(glucose_status['dura05'])                    # minutes of staying within +/-5% range
     avg05  = glucose_status['avg05']
     maxISFReduction = profile['autoISF_max']                    # mod 7d
     sens_modified = False
     pp_ISF = 1                                                  # mod 14f
     delta_ISF = 1                                               # mod 14f
-    pp_ISF = 1                                                  # mod 14f1
     acce_ISF = 1                                                # mod 14j
-    bg_off = target_bg+10 - avg05                               # move from central BG=100 to target+10 as virtual BG'=100
+    acce_weight = 1
+    bg_off = target_bg+10 - glucose_status['glucose']           # move from central BG=100 to target+10 as virtual BG'=100
+    gz_proto = 'full_basal_exercise_target' in profile
     
     #// start of mod V14j: calculate acce_ISF from bg acceleration and adapt ISF accordingly
     if 'acce_ISF' in new_parameter:
@@ -371,35 +445,40 @@ def autoISF(sens, target_bg, profile, glucose_status, meal_data, currentTime, au
             minmax_delta = - glucose_status['parabola_fit_a1']/2/glucose_status['parabola_fit_a2'] * 5       #// back from 5min block  1 min
             minmax_value = round(glucose_status['parabola_fit_a0'] - minmax_delta*minmax_delta/25*glucose_status['parabola_fit_a2'], 1)
             minmax_delta = round(minmax_delta, 1)
-            #if (minmax_delta<0 and bg_acce<0) :
-            #    console_error("Parabolic fit saw maximum of", short(minmax_value), "about", short(-minmax_delta), "minutes ago")
-            #elif (minmax_delta<0 and bg_acce>0) :
-            #    console_error("Parabolic fit saw minimum of", short(minmax_value), "about", short(-minmax_delta), "minutes ago")
             if (minmax_delta>0 and bg_acce<0) :
-                console_error("Parabolic fit extrapolates a maximum of", short(minmax_value), "in about", short(minmax_delta), "minutes")
+                console_error("Parabolic fit extrapolates a maximum of", short(convert_bg(minmax_value,profile)), "in about", short(minmax_delta), "minutes")
             elif (minmax_delta>0 and bg_acce>0) :
-                console_error("Parabolic fit extrapolates a minimum of", short(minmax_value), "in about", short(minmax_delta), "minutes")
+                console_error("Parabolic fit extrapolates a minimum of", short(convert_bg(minmax_value,profile)), "in about", short(minmax_delta), "minutes")
+                #console_error(str(minmax_delta<=30), str(minmax_value<target_bg), str(glucose_status['glucose']>target_bg) )
+                if (minmax_delta<=30 and minmax_value<target_bg):   # and glucose_status['glucose']>target_bg):   #// start braking, the lower the harder
+                    acce_weight = -profile['bgBrake_ISF_weight'] # zunächst schnelle Abhilfe ... * (target_bg-minmax_value) / (glucose_status['glucose']-minmax_value)
+                    console_error('extrapolation below target soon: use bgBrake_ISF_weight instead')
         if ( fit_corr<corr_Min ) :
             console_error("acce_ISF adaptation by-passed as correlation", round(fit_corr,3), "is too low")
         else :
             fit_share = 10*(fit_corr-corr_Min)                      #// 0 at correlation 0.9, 1 at 1.00
             cap_weight = 1                                          #// full contribution above target
-            acce_weight = 1
-            if ( glucose_status['glucose']<profile['target_bg'] ) : #// below target acce goes towards target         
+            meal_type_factor = 1
+            meal_addon= 0
+            if (loop_wanted_smb=="fullLoop") :
+                if 'meal_addon' in profile:
+                    meal_addon = profile['meal_addon']              #// like stronger during meal times
+                elif 'meal_type_weight' in profile and acce_weight==1:
+                    meal_type_factor = 1+profile['meal_type_weight'] #// like 30% stronger during meal times
+                    console_error("meal type factor is", round(meal_type_factor,2))
+            if meal_addon > 0:    console_error("meal_addon is", round(meal_addon,2))
+            if ( acce_weight==1 and glucose_status['glucose']<profile['target_bg'] ):  #// below target acce goes towards target         
                 if ( bg_acce > 0 ) :
                     if  bg_acce>1 :     cap_weight = 0.5            #// halve the effect below target
                     acce_weight = profile['bgBrake_ISF_weight']
                 elif ( bg_acce < 0 ):
-                    acce_weight = profile['bgAccel_ISF_weight']
-            else :                                                  #// above target acce goes away from target
+                    acce_weight = profile['bgAccel_ISF_weight'] + meal_addon
+            elif ( acce_weight==1 ):                                #// above target acce goes away from target
                 if ( bg_acce < 0 ) :
                     acce_weight = profile['bgBrake_ISF_weight']
                 elif ( bg_acce > 0 ):
-                    acce_weight = profile['bgAccel_ISF_weight']
-            if 'acce_ISF' in new_parameter:
-                acce_ISF = new_parameter['acce_ISF']
-            else:
-                acce_ISF = 1 + bg_acce * cap_weight * acce_weight * fit_share
+                    acce_weight = profile['bgAccel_ISF_weight'] + meal_addon
+            acce_ISF = 1 + bg_acce * cap_weight * acce_weight * fit_share * meal_type_factor
             console_error("acce_ISF adaptation is", short(round(acce_ISF,2)))
             Fcasts['acceISF'] = acce_ISF    #profile['sens'] / acce_ISF
             if ( acce_ISF != 1 ) :
@@ -409,44 +488,38 @@ def autoISF(sens, target_bg, profile, glucose_status, meal_data, currentTime, au
     if 'bg_ISF' in new_parameter:
         bg_ISF = new_parameter['bg_ISF']
     else:
-        bg_ISF = 1 + interpolate(100-bg_off, profile)
+        #print('calling interpolate with bg_off='+str(bg_off), ' avg05='+str(avg05))
+        bg_ISF = 1 + interpolate(100-bg_off, profile, "bg")
     console_error("bg_ISF adaptation is", short(round(bg_ISF,2)))
     Fcasts['BZ_ISF'] = bg_ISF           #profile['sens']  / bg_ISF
-    #if ( bg_ISF<1 and acce_ISF>1 ) :                                                                       #// mod V14j
-    #    bg_ISF = bg_ISF * acce_ISF                                                                         #// mod V14j:
-    #    console_error("bg_ISF adaptation lifted to", round(bg_ISF,2), "as bg accelerates already")         #// mod V14j
+    liftISF = 1
+    finalISF = 1
     if (bg_ISF<1) :
         liftISF = min(bg_ISF, acce_ISF)
         if ( acce_ISF>1 ) :
             liftISF = bg_ISF * acce_ISF                                                                     #// mod V14j:
             console_error("bg_ISF adaptation lifted to", short(round(liftISF,2)), "as bg accelerates already")     #// mod V14j
         
-        final_ISF = withinISFlimits(liftISF, profile['autoISF_min'], maxISFReduction, sensitivityRatio) 
-        #if ( liftISF < profile['autoisf_min'] ) :                                                          #// mod V14j
-        #    console_error("final ISF factor", short(round(liftISF,2)), "limited by autoisf_min", profile['autoisf_min'])  #// mod V14j
-        #    liftISF = profile['autoisf_min']                                                               #// mod V14j
-        #elif ( liftISF > maxISFReduction ) :                                                               #// mod V14j: not possible here
-        #    console.error("final ISF factor", short(round(liftISF,2)), "limited by autoisf_max", maxISFReduction)  #// mod V14j
-        #    liftISF = maxISFReduction                                                                      #// mod V14j
-        #if ( liftISF >= 1 ) :           final_ISF = max(liftISF, sensitivityRatio)
-        #if ( liftISF <  1 ) :           final_ISF = min(liftISF, sensitivityRatio)
+        final_ISF = withinISFlimits(liftISF, profile['autoISF_min'], maxISFReduction, sensitivityRatio, origin_sens, profile, high_temptarget_raises_sensitivity, target_bg, normalTarget, stepActivityDetected, stepInactivityDetected) 
         emulAI_ratio[-1] = final_ISF * 10
-        Fcasts['emulISF'] = profile['sens'] / final_ISF
+        Fcasts['emulISF'] = min(720, profile['sens'] / final_ISF)
         return min(720, round(profile['sens'] / final_ISF, 1))                                              #// mod V14j: observe ISF maximum of 720(?)
     elif ( bg_ISF > 1 ) :
         sens_modified = True
 
-    if 'delta_ISF' in new_parameter:
+    if 'delta_ISF' in new_parameter and profile['autoISF_version']!='3.0.1' :
         delta_ISF = new_parameter['delta_ISF']
         console_error("delta_ISF adaptation is", short(round(delta_ISF,2)))
     else:
         bg_delta = glucose_status['delta']
         if (profile['enable_pp_ISF_always'] or profile['pp_ISF_hours']>=(currentTime - meal_data['lastCarbTime']) / 1000/3600) :
             deltaType = 'pp'
+        elif profile['autoISF_version']=='3.0.1' :
+            deltaType = 'pp'
         else :
             deltaType = 'delta'
         if (bg_off > 0) :
-            console_error(deltaType+"_ISF adaptation by-passed as average glucose < "+str(target_bg)+"+10")
+            console_error(deltaType+"_ISF adaptation by-passed as average glucose < "+str(convert_bg(target_bg, profile))+"+10")
         elif (glucose_status['short_avgdelta']<0) :
             console_error(deltaType+"_ISF adaptation by-passed as no rise or too short lived")
         elif (deltaType == 'pp') :
@@ -459,7 +532,7 @@ def autoISF(sens, target_bg, profile, glucose_status, meal_data, currentTime, au
             if (pp_ISF != 1) :
                 sens_modified = True
         else:
-            delta_ISF = interpolate(bg_delta, profile)
+            delta_ISF = interpolate(bg_delta, profile, "delta")
             #//  mod V14d: halve the effect below target_bg+30
             if ( bg_off > -20 ) :
                 delta_ISF = 0.5 * delta_ISF
@@ -470,21 +543,28 @@ def autoISF(sens, target_bg, profile, glucose_status, meal_data, currentTime, au
         sens_modified = True
 
     dura_ISF = 1
-    weightISF = profile['dura_ISF_weight'] 
-    if (meal_data['mealCOB']>0 and not profile['enable_dura_ISF_with_COB']) :
-        console_error("dura_ISF by-passed; preferences disabled mealCOB of "+round(meal_data['mealCOB'],1))    #// mod 7f
-    elif (dura05<10) :
-        console_error("dura_ISF by-passed; bg is only "+str(dura05)+"m at level", short(avg05))
-    elif (avg05 <= target_bg) :
-        console_error("dura_ISF by-passed; avg. glucose", avg05, "below target", target_bg)
-    else :
-        #// # fight the resistance at high levels
-        dura05_weight = dura05 / 60
-        avg05_weight = weightISF / target_bg;                                      #// mod gz7b: provide access from AAPS
-        dura_ISF += dura05_weight*avg05_weight*(avg05-target_bg)
-        sens_modified = True
-        console_error("dura_ISF adaptation is", short(round(dura_ISF,2)), "because ISF", short(round(sens,1)), "did not do it for", short(round(dura05,1)),"m")
-        emulAI_ratio[-1] = min(dura_ISF, maxISFReduction)*10
+    if 'dura_ISF' in new_parameter:
+        dura_ISF = new_parameter['dura_ISF']
+        console_error("dura_ISF adaptation is", short(round(dura_ISF,2)))
+        Fcasts['duraISF'] = dura_ISF
+        if ( dura_ISF != 1 ) :
+            sens_modified = True
+    else:
+        weightISF = profile['dura_ISF_weight'] 
+        if (meal_data['mealCOB']>0 and not profile['enable_dura_ISF_with_COB'] and profile['autoISF_version']!='3.0.1') :
+            console_error("dura_ISF by-passed; preferences disabled mealCOB of "+str(round(meal_data['mealCOB'],1)))    #// mod 7f
+        elif (dura05<10) :
+            console_error("dura_ISF by-passed; bg is only "+str(dura05)+"m at level", short(convert_bg(avg05, profile)))
+        elif (avg05 <= target_bg) :
+            console_error("dura_ISF by-passed; avg. glucose", str(convert_bg(avg05, profile)), "below target", short(convert_bg(target_bg, profile)))
+        else :
+            #// # fight the resistance at high levels
+            dura05_weight = dura05 / 60
+            avg05_weight = weightISF / target_bg;                                      #// mod gz7b: provide access from AAPS
+            dura_ISF += dura05_weight*avg05_weight*(avg05-target_bg)
+            sens_modified = True
+            console_error("dura_ISF adaptation is", short(round(dura_ISF,2)), "because ISF", short(round(sens,1)), "did not do it for", short(round(dura05,1)),"m")
+            emulAI_ratio[-1] = min(dura_ISF, maxISFReduction)*10
 
     if ( sens_modified ) :
         Fcasts['BZ_ISF'] = bg_ISF                       #profile['sens'] / bg_ISF
@@ -494,52 +574,115 @@ def autoISF(sens, target_bg, profile, glucose_status, meal_data, currentTime, au
         Fcasts['dura_ISF'] = dura_ISF                   #profile['sens'] / dura_ISF
         liftISF = max(dura_ISF, bg_ISF, delta_ISF, acce_ISF, pp_ISF)                                                #// corrected logic on 30.Jan.2022
         if acce_ISF<1 :
-            console_error("strongest ISF factor", short(round(liftISF,2)), "weakened to", short(round(liftISF*acce_ISF,2)), "as bg decelerates already")  #// mod V14j: brakes on for otherwise stronger or stable ISF
+            console_error("strongest autoISF factor", short(round(liftISF,2)), "weakened to", short(round(liftISF*acce_ISF,2)), "as bg decelerates already")  #// mod V14j: brakes on for otherwise stronger or stable ISF
             liftISF = liftISF * acce_ISF                                                                            # put the deceleration brakes on
-        final_ISF = withinISFlimits(liftISF, profile['autoISF_min'], maxISFReduction, sensitivityRatio) 
-        #if ( liftISF < profile['autoisf_min'] ) :                                                                   #// mod V14j: below minimum?
-        #    console_error("final ISF factor", short(round(liftISF,2)), "limited by autoisf_min", profile['autoisf_min'])   #// mod V14j
-        #    liftISF = profile['autoisf_min']                                                                        #// mod V14j
-        #elif ( liftISF > maxISFReduction ) :                                                                        #// mod V14j
-        #    console_error("final ISF factor", short(round(liftISF,2)), "limited by autoisf_max", maxISFReduction)          #// mod V14j
-        #    liftISF = maxISFReduction                                                                               #// mod V14j
-        #if ( liftISF >= 1 ) :           final_ISF = max(liftISF, sensitivityRatio)
-        #if ( liftISF <  1 ) :           final_ISF = min(liftISF, sensitivityRatio)
+        final_ISF = withinISFlimits(liftISF, profile['autoISF_min'], maxISFReduction, sensitivityRatio, origin_sens, profile, high_temptarget_raises_sensitivity, target_bg, normalTarget, stepActivityDetected, stepInactivityDetected) 
         emulAI_ratio[-1] = final_ISF * 10
         Fcasts['emulISF'] = profile['sens'] / final_ISF
         return round(profile['sens'] / final_ISF, 1)
+    #else:
+    console_error("----------------------------------")
+    console_error("end autoISF")
+    console_error("----------------------------------")
     return sens
     
-    ## insert flowchart things above
+## insert flowchart things above
 
-def determine_varSMBratio(profile, bg, target_bg, Flows):
+def determine_varSMBratio(profile, bg, target_bg, loop_wanted_smb, Flows):
     #// mod 12: let SMB delivery ratio increase from min to max depending on how much bg exceeds target
-    if 'smb_delivery_ratio_bg_range' in profile:
-        use_fixed_SMB_ratio = False
-        if profile['smb_delivery_ratio_bg_range'] == 0 :
-            use_fixed_SMB_ratio = True
-    else:
-        use_fixed_SMB_ratio = True
-    if use_fixed_SMB_ratio:
-        #// not yet upgraded to this version or deactivated in SMB extended menu
-        console_error('SMB delivery ratio set to fixed value', profile['smb_delivery_ratio'])
-        Flows.append(dict(title="SMB delivery ratio set\nto fixed value "+str(profile['smb_delivery_ratio']), indent='0', adr='varSMB_173+'))
-        return profile['smb_delivery_ratio']
-    lower_SMB = min(profile['smb_delivery_ratio_min'], profile['smb_delivery_ratio_max'])
+    smb_delivery_ratio_bg_range = profile['smb_delivery_ratio_bg_range']
+    if ( smb_delivery_ratio_bg_range<10 ) : smb_delivery_ratio_bg_range = smb_delivery_ratio_bg_range * 18 #// was in mmol/l
+    fix_SMB = profile['smb_delivery_ratio']
+    lower_SMB  = min(profile['smb_delivery_ratio_min'], profile['smb_delivery_ratio_max'])
+    higher_SMB = max(profile['smb_delivery_ratio_min'], profile['smb_delivery_ratio_max'])
+    higher_bg = target_bg + smb_delivery_ratio_bg_range
+    new_SMB = fix_SMB
+    if ( smb_delivery_ratio_bg_range > 0) :
+        new_SMB = lower_SMB + (higher_SMB-lower_SMB)*(bg-target_bg) / smb_delivery_ratio_bg_range
+        new_SMB = max(lower_SMB, min(higher_SMB, new_SMB))  #// cap if outside 
+
+    if ( loop_wanted_smb=='fullLoop' ) :                    #// go for max impact
+        console_error('SMB delivery ratio set to', max(fix_SMB, new_SMB), 'as max of fixed and interpolated values')
+        return max(fix_SMB, new_SMB)
+    if ( smb_delivery_ratio_bg_range==0 ) :                 #// deactivated in SMB extended menu
+        console_error('SMB delivery ratio set to fixed value', fix_SMB)
+        return fix_SMB
     if (bg <= target_bg) :
         console_error('SMB delivery ratio limited by minimum value', lower_SMB)
-        Flows.append(dict(title="SMB delivery ratio limited\nby minimum value "+str(lower_SMB), indent='0', adr='varSMB_178+'))
         return lower_SMB
-    higher_SMB = max(profile['smb_delivery_ratio_min'], profile['smb_delivery_ratio_max'])
-    higher_bg = target_bg + profile['smb_delivery_ratio_bg_range'];
     if (bg >= higher_bg) :
         console_error('SMB delivery ratio limited by maximum value', higher_SMB)
-        Flows.append(dict(title="SMB delivery ratio limited\nby maximum value "+str(higher_SMB), indent='0', adr='varSMB_184+'))
         return higher_SMB
-    new_SMB = lower_SMB + (higher_SMB - lower_SMB)*(bg-target_bg) / profile['smb_delivery_ratio_bg_range']
+    #if (abs(profile['parabola_fit_source']) == 1) :
+    #    console_error('SMB delivery ratio for FSL kept at fixed value', fix_SMB)
+    #    return fix_SMB
     console_error('SMB delivery ratio set to interpolated value', new_SMB)
-    Flows.append(dict(title="SMB delivery ratio set\nto interpolated value "+str(round(new_SMB,3)), indent='0', adr='varSMB_188+'))
     return new_SMB
+
+def activityMonitor(profile, bg, target_bg, thisTime, utcOffset):
+    hour = int(thisTime / 3600 / 1000) % 24
+    if hour <1:  hour = 1
+        
+    if 'activity_detection' in profile:
+        activityDetection = profile['activity_detection']
+    elif 'key_activity_detection' in profile:
+        activityDetection = profile['key_activity_detection']   # earlier implementation
+    else:
+        return 1                                                # older logfile from pre-activity times
+    
+    recentSteps5Minutes  = profile['recentSteps5Minutes']
+    recentSteps10Minutes = profile['recentSteps10Minutes']
+    recentSteps15Minutes = profile['recentSteps15Minutes']
+    recentSteps30Minutes = profile['recentSteps30Minutes']
+    recentSteps60Minutes = profile['recentSteps60Minutes']
+    phoneMoved = profile['phone_moved']
+    time_since_start = profile['time_since_start']
+    activity_scale_factor = profile['activity_scale_factor']
+    inactivity_scale_factor = profile['inactivity_scale_factor']
+    ignore_inactivity_overnight = profile['ignore_inactivity_overnight']
+    inactivity_idle_start = (profile['inactivity_idle_start'] - utcOffset) % 24
+    inactivity_idle_end = (profile['inactivity_idle_end'] - utcOffset) % 24
+    activityRatio = 1.0
+
+    #print('sleeping', str(inactivity_idle_start), str(inactivity_idle_end), str(hour))
+    
+    if ( not activityDetection ) :
+        if 'activity_detection' in profile or 'key_activity_detection' in profile:
+            console_error("Activity monitor disabled in settings")
+    elif ( profile['temptargetSet'] ) :
+        console_error("Activity monitor disabled: tempTarget")
+    elif ( phoneMoved == False ) :
+        console_error("Activity monitor disabled: Phone seems not to be carried for the last 15m")
+    else :
+        if ( time_since_start < 60 and recentSteps60Minutes <= 200 ) :
+            console_error("Activity monitor initialising for "+str(60-time_since_start)+" more minutes: inactivity detection disabled")
+        elif ( ( inactivity_idle_start>inactivity_idle_end and ( hour>=inactivity_idle_start or hour<inactivity_idle_end ) ) #//inludes midnight
+            or ( hour>=inactivity_idle_start and hour<inactivity_idle_end) #// excludes midnight
+            and recentSteps60Minutes <= 200 and ignore_inactivity_overnight ) :
+            console_error("Activity monitor disabled: sleeping hours")
+        elif ( recentSteps5Minutes > 300 or recentSteps10Minutes > 300 or recentSteps15Minutes > 300 or recentSteps30Minutes > 1500 or recentSteps60Minutes > 2500 ) :
+            #stepActivityDetected = True
+            activityRatio = 1 - 0.3 * activity_scale_factor
+            console_error("Activity monitor detected activity, sensitivity ratio: " +str(activityRatio))
+        elif ( recentSteps5Minutes > 200 or recentSteps10Minutes > 200 or recentSteps15Minutes > 200
+            or recentSteps30Minutes > 500 or recentSteps60Minutes > 800 ) :
+            #stepActivityDetected = True
+            activityRatio = 1 - 0.15 * activity_scale_factor
+            console_error("Activity monitor detected partial activity, sensitivity ratio: " +str(activityRatio))
+        elif ( bg < target_bg and recentSteps60Minutes <= 200 ) :
+            console_error("Activity monitor disabled inactivity detection: bg < target")
+        elif ( recentSteps60Minutes < 50 ) :
+            #stepInactivityDetected = True
+            activityRatio = 1 + 0.2 * inactivity_scale_factor
+            console_error("Activity monitor detected inactivity, sensitivity ratio: " + str(activityRatio))
+        elif ( recentSteps60Minutes <= 200 ) :
+            #stepInactivityDetected = True
+            activityRatio = 1 + 0.1 * inactivity_scale_factor
+            console_error("Activity monitor detected partial inactivity, sensitivity ratio: " + str(activityRatio));
+        else :
+            console_error("Activity monitor detected neutral state, sensitivity ratio unchanged: " + str(short(activityRatio)))
+        #//console_error("end Activity detection")
+    return activityRatio
 
 def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_data, meal_data, tempBasalFunctionsDummy, microBolusAllowed, reservoir_data, thisTime, Fcasts, Flows, emulAI_ratio):
     rT = {} #//short for requestedTemp
@@ -601,6 +744,12 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
     else:   # the new logic as of V2.7
         #// 38 is an xDrip error state that usually indicates sensor failure
         #// all other BG values between 11 and 37 mg/dL reflect non-error-code BG values, so we should zero temp for those
+        if 'cmgFlatMinutes' in glucose_status:
+            cgmUnPlausible = glucose_status['cmgFlatMinutes'] > 44   #// is this a useful default?
+            cgmMsg = "Error: CGM data was suspiciously flat for the past ~"+str(glucose_status.cgmFlatMinutes)+"m"
+        else:
+            cgmUnPlausible = glucose_status['delta'] == 0 and glucose_status['short_avgdelta'] > -1 and glucose_status['short_avgdelta'] < 1 and glucose_status['long_avgdelta'] > -1 and glucose_status['long_avgdelta'] < 1 
+            cgmMsg = "Error: CGM data is unchanged for the past ~45m"
         if (bg <= 10 or bg == 38 or noise >= 3) :
             #//Dexcom is in ??? mode or calibrating, or xDrip reports high noise
             rT['reason'] = "CGM is calibrating, in ??? state, or noise is high"
@@ -612,14 +761,14 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
         if new_parameter['CheckLibreError'] :      #### GZ:    normally I deactivate this Libre specific test
             if (minAgo > 12 or minAgo < -5)  : 
                 pass
-            elif ( bg > 60 and glucose_status['delta'] == 0 and glucose_status['short_avgdelta'] > -1 and glucose_status['short_avgdelta'] < 1 and glucose_status['long_avgdelta'] > -1 and glucose_status['long_avgdelta'] < 1 ) :
+            elif ( bg > 60 and cgmUnPlausible and not isSaveCgmSource ) :
                 if 'last_cal' in glucose_status :
                     if glucose_status['last_cal'] < 3 :
                         rT['reason'] = "CGM was just calibrated"
                 else :
                     rT['reason'] = "Error: CGM data is unchanged for the past ~45m"
             #// cherry pick from oref upstream dev cb8e94990301277fb1016c778b4e9efa55a6edbc
-            if (bg <= 10 or bg == 38 or noise >= 3 or minAgo > 12 or minAgo < -5 or ( bg > 60 and glucose_status['delta'] == 0 and glucose_status['short_avgdelta'] > -1 and glucose_status['short_avgdelta'] < 1 and glucose_status['long_avgdelta'] > -1 and glucose_status['long_avgdelta'] < 1 )) :
+            if (bg <= 10 or bg == 38 or noise >= 3 or minAgo > 12 or minAgo < -5 or ( bg > 60 and cgmUnPlausible and not isSaveCgmSource)) :
                 if (currenttemp['rate'] > basal) : # // high temp is running
                     rT['reason'] += ". Replacing high temp basal of "+str(currenttemp['rate'])+" with neutral temp of "+str(basal)
                     rT['deliverAt'] = deliverAt
@@ -656,43 +805,87 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
         rT['error'] ='Error: could not determine target_bg. '
         return rT
 
+    activityRatio = activityMonitor(profile, bg, target_bg, thisTime, iob_data['utcOffset'])   #// stepActivityDetected, stepInactivityDetected);
+    stepActivityDetected = False
+    stepInactivityDetected = False
+    if   (activityRatio<1) :        stepActivityDetected = True
+    elif (activityRatio>1) :        stepInactivityDetected = True
+
     #sensitivityRatio;
+    origin_sens = ""
     high_temptarget_raises_sensitivity = profile['exercise_mode'] or profile['high_temptarget_raises_sensitivity']
-    normalTarget = 100          #// evaluate high/low temptarget against 100, not scheduled basal/target (which might change)
+    gz_proto = 'full_basal_exercise_target' in profile
+    if  gz_proto and profile['exercise_mode']:
+        fullBasalTarget = profile['full_basal_exercise_target']
+    else :
+        fullBasalTarget = 100       #// when temptarget is 100 mg/dL, run 100% basal
+        #// 80 mg/dL with low_temptarget_lowers_sensitivity would give 1.5x basal, but is limited to autosens_max (1.2x by default)
+       
+    normalTarget = fullBasalTarget  #// was 100;    // evaluate high/low temptarget against 100, not scheduled basal/target (which might change)
     if  'half_basal_exercise_target' in profile:
         halfBasalTarget = profile['half_basal_exercise_target']
     else:
         halfBasalTarget = 160   #// when temptarget is 160 mg/dL, run 50% basal (120 = 75%; 140 = 60%)
         #// 80 mg/dL with low_temptarget_lowers_sensitivity would give 1.5x basal, but is limited to autosens_max (1.2x by default)
+    exercise_ratio = 1
     if AAPS_Version == '2.7' :
         HTToffset = 0
     else :
         HTToffset = 10
     Flows.append(dict(title="Impact of\ntemptarget("+str(target_bg)+")\non sensitivity ("+str(round(autosens_data['ratio'],2))+")", indent='0', adr='140'))
-    if ( high_temptarget_raises_sensitivity and profile['temptargetSet'] and target_bg > normalTarget + HTToffset 
-        or  profile['low_temptarget_lowers_sensitivity'] and profile['temptargetSet'] and target_bg < normalTarget ):
-        #// w/ target 100, temp target 110 = .89, 120 = 0.8, 140 = 0.67, 160 = .57, and 200 = .44
-        #// e.g.: Sensitivity ratio set to 0.8 based on temp target of 120; Adjusting basal from 1.65 to 1.35; ISF from 58.9 to 73.6
-        #//sensitivityRatio = 2/(2+(target_bg-normalTarget)/40);
-        c = halfBasalTarget - normalTarget
-        sensitivityRatio = c/(c+target_bg-normalTarget)
-        #// limit sensitivityRatio to profile.autosens_max (1.2x by default)
-        sensitivityRatio = min(sensitivityRatio, profile['autosens_max'])
-        sensitivityRatio = round(sensitivityRatio,2)
-        console_error("Sensitivity ratio set to "+str(sensitivityRatio)+" based on temp target of "+str(target_bg)+"; ")
-        Flows.append(dict(title="Sensitivity ratio set to "+str(sensitivityRatio)+"\nbased on temp target of "+str(target_bg), indent='1', adr='140-xx'))
+    if ( high_temptarget_raises_sensitivity and profile['temptargetSet'] and target_bg > normalTarget
+        or profile['low_temptarget_lowers_sensitivity'] and profile['temptargetSet'] and target_bg<normalTarget
+        or stepActivityDetected or stepInactivityDetected ) :
+        if ( (high_temptarget_raises_sensitivity and profile['temptargetSet'] and target_bg>normalTarget + HTToffset) 
+            or  (profile['low_temptarget_lowers_sensitivity'] and profile['temptargetSet'] and target_bg<normalTarget) ):
+            #// w/ target 100, temp target 110 = .89, 120 = 0.8, 140 = 0.67, 160 = .57, and 200 = .44
+            #// e.g.: Sensitivity ratio set to 0.8 based on temp target of 120; Adjusting basal from 1.65 to 1.35; ISF from 58.9 to 73.6
+            #//sensitivityRatio = 2/(2+(target_bg-normalTarget)/40);
+            c = halfBasalTarget - normalTarget
+            if (c * (c + target_bg-normalTarget) <= 0.0) :
+                #// limit sensitivityRatio to profile.autosens_max (1.2x by default)
+                sensitivityRatio = profile['autosens_max']
+            else:
+                sensitivityRatio = c/(c+target_bg-normalTarget)
+            sensitivityRatio = min(sensitivityRatio, profile['autosens_max'])
+            sensitivityRatio = round(sensitivityRatio,2)
+            exercise_ratio = sensitivityRatio
+            origin_sens = "from TT modifier"
+            if gz_proto:
+                console_error("Sensitivity ratio set to "+str(sensitivityRatio)+" based on full/half/TT of "+str(fullBasalTarget)+"/"+str(halfBasalTarget)+"/"+str(target_bg)+";")
+                Flows.append(dict(title="Sensitivity ratio set to "+str(sensitivityRatio)+"\nbased on full/half/TT of "+str(fullBasalTarget)+"/"+str(halfBasalTarget)+"/"+str(target_bg), indent='1', adr='140-xx'))
+            else:
+                console_error("Sensitivity ratio set to "+str(sensitivityRatio)+" based on temp target of "+str(short(convert_bg(target_bg, profile))))
+                Flows.append(dict(title="Sensitivity ratio set to "+str(short(sensitivityRatio))+"\nbased on temp target of "+str(target_bg), indent='1', adr='140-xx'))
+        elif ( stepActivityDetected ) :
+            sensitivityRatio = activityRatio
+            origin_sens = "from activity detection"
+            #//console_error("Sensitivity ratio set to "+str(sensitivityRatio)+" based on activity detection")
+            Flows.append(dict(title="Sensitivity ratio set to "+str(sensitivityRatio)+"\nbased on activity detection", indent='1', adr='140-xx'))
+        elif ( stepInactivityDetected ) :
+            sensitivityRatio = activityRatio
+            origin_sens = "from inactivity detection";
+            #//console_error("Sensitivity ratio set to "+str(sensitivityRatio)+" based on inactivity detection");
+            Flows.append(dict(title="Sensitivity ratio set to "+str(sensitivityRatio)+"\nbased on inactivity detection", indent='1', adr='140-xx'))
     elif ( typeof(autosens_data) != 'undefined'  and autosens_data):
         sensitivityRatio = autosens_data['ratio']
+        origin_sens = "from Autosens"
         console_error("Autosens ratio: "+str(sensitivityRatio)+";")
         Flows.append(dict(title="Autosens ratio "+str(sensitivityRatio), indent='1', adr='140-x'))
 
-    Flows.append(dict(title="Impact of\nautosense("+str(round(sensitivityRatio,3))+")\non  basal", indent='0', adr='140'))
+    Flows.append(dict(title="Impact of\nautosens("+str(round(sensitivityRatio,3))+")\non  basal", indent='0', adr='140'))
+    iobTH_reduction_ratio = 1.0
+    use_iobTH = False
+    if (profile['iob_threshold_percent'] != 100) :
+        iobTH_reduction_ratio = profile['profile_percentage'] / 100 * exercise_ratio * activityRatio
+        use_iobTH = True
+    Fcasts['emuliobTH'] = iobTH_reduction_ratio * profile['max_iob'] * profile['iob_threshold_percent'] / 10    # scale up for plotting
     if (sensitivityRatio):
         basal = profile['current_basal'] * sensitivityRatio
         basal = round_basal(basal, profile)
         if (basal != profile_current_basal):
-            console_error("Adjusting basal from",profile_current_basal, "to "+str(basal)+";")
-            Flows.append(dict(title="Adjust basal("+str(profile_current_basal)+")\nto "+str(basal), indent='+1', adr='144'))
+            console_error("Adjusting basal from",str(round(profile_current_basal,3)), "to "+str(round(basal,3))+";")
+            Flows.append(dict(title="Adjust basal("+str(round(profile_current_basal,3))+")\nto "+str(round(basal,3)), indent='+1', adr='144'))
         else:
             console_error("Basal unchanged: "+str(basal)+ ";")
             Flows.append(dict(title="Basal ("+str(basal)+ ")\nunchanged", indent='+1', adr='146'))
@@ -716,10 +909,10 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
             Flows.append(dict(title="Checking:\ndon't allow\ntarget_bg < 80", indent='+0', adr='161'))
             if (target_bg == new_target_bg):
                 Flows.append(dict(title='True; target_bg\nunchanged: '+str(new_target_bg) , indent='+1', adr='162'))
-                console_error("target_bg unchanged: "+str(new_target_bg)+";")
+                console_error("target_bg unchanged: "+str(convert_bg(new_target_bg, profile))+";")
             else:
                 Flows.append(dict(title='False; target_bg\nfrom '+str(target_bg)+' to '+str(new_target_bg), indent='+1', adr='164'))
-                console_error("target_bg from "+str(target_bg)+" to "+str(new_target_bg)+";")
+                console_error("target_bg from "+str(convert_bg(target_bg, profile))+" to "+str(convert_bg(new_target_bg, profile))+";")
             target_bg = new_target_bg
 
     if (typeof (iob_data) == 'undefined' ):
@@ -760,8 +953,104 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
             Flows.append(dict(title="ISF unchanged("+str(short(sens))+")\nby autosense", indent='+1', adr='206'))
             console_error("ISF unchanged:",short(sens))
         #//console_error(" (autosens ratio "+sensitivityRatio+")");
-    console_error("; CR:", profile['carb_ratio'])
-    sens = autoISF(sens, target_bg, profile, glucose_status, meal_data, currentTime, autosens_data, sensitivityRatio, new_parameter, Fcasts, Flows, emulAI_ratio)
+    console_error("CR:", profile['carb_ratio'])
+
+    console_error("----------------------------------")
+    console_error("start autoISF", profile['autoISF_version'])
+    console_error("----------------------------------")
+    #// mod autoISF3.0-dev: if that would put us over iobTH, then reduce accordingly; allow 30% overrun
+    iobTHtolerance = 130.0
+    iobTHvirtual = profile['iob_threshold_percent']*iobTHtolerance/10000.0 * profile['max_iob'] * iobTH_reduction_ratio
+    
+    #// enable SMB whenever we have COB or UAM is enabled
+    #// SMB is disabled by default, unless explicitly enabled in preferences.json
+    enableSMB=False
+    #// disable SMB when a high temptarget is set
+    Flows.append(dict(title='leave SMB off?', indent='0', adr='348'))
+    loop_wanted_smb = loop_smb(microBolusAllowed, profile, iob_data, use_iobTH, iobTHvirtual/iobTHtolerance*100.0, Flows)
+    if (microBolusAllowed and loop_wanted_smb != "AAPS") :
+        if ( loop_wanted_smb=="enforced" or loop_wanted_smb=="fullLoop" ):   #// otherwise FL switched SMB off
+            enableSMB = True
+    elif AAPS_Version=='2.7' :
+        enableSMB = enable_smb(profile, microBolusAllowed, meal_data, target_bg, Flows)
+    else:
+        if (not microBolusAllowed) :
+            Flows.append(dict(title='Yes; found\nSMB not allowed', indent='+1', adr='349'))
+            console_error("SMB disabled (!microBolusAllowed)")
+        elif (not profile['allowSMB_with_high_temptarget'] and profile['temptargetSet'] and target_bg > 100) :
+            Flows.append(dict(title="Yes; SMB disabled\ndue to high temptarget of "+str(target_bg), indent='+1', adr='351'))
+            console_error("SMB disabled due to high temptarget of "+str(convert_bg(target_bg, profile)))
+            enableSMB=False
+        #// enable SMB/UAM (if enabled in preferences) while we have COB
+        elif (profile['enableSMB_with_COB'] == True and meal_data['mealCOB']) :
+            Flows.append(dict(title="Check bwCarbs", indent='+1', adr='355'))
+            if (meal_data['bwCarbs']) :
+                Flows.append(dict(title="Check\nA52_risk_enable", indent='+1', adr='356'))
+                if (profile['A52_risk_enable']) :
+                    Flows.append(dict(title="Warning:\nSMB enabled with Bolus Wizard carbs:\nbe sure to easy bolus\n30s before using Bolus Wizard", indent='+1', adr='357'))
+                    console_error("Warning: SMB enabled with Bolus Wizard carbs: be sure to easy bolus 30s before using Bolus Wizard")
+                    enableSMB=True
+                else :
+                    Flows.append(dict(title="SMB not enabled\nfor Bolus Wizard COB", indent='+1', adr='360'))
+                    console_error("SMB not enabled for Bolus Wizard COB")
+            else :
+                Flows.append(dict(title="SMB enabled for COB of "+str(round(meal_data['mealCOB'],2)), indent='+1', adr='363'))
+                console_error("SMB enabled for COB of "+str(meal_data['mealCOB']))
+                enableSMB=True
+        #// enable SMB/UAM (if enabled in preferences) for a full 6 hours after any carb entry
+        #// (6 hours is defined in carbWindow in lib/meal/total.js)
+        elif (profile['enableSMB_after_carbs'] == True and meal_data['carbs'] ) :
+            Flows.append(dict(title="Check bwCarbs", indent='+1', adr='369'))
+            if (meal_data['bwCarbs']) :
+                Flows.append(dict(title="Check\nA52_risk_enable", indent='+1', adr='370'))
+                if (profile['A52_risk_enable']) :
+                    Flows.append(dict(title="Warning:\nSMB enabled with Bolus Wizard carbs:\nbe sure to easy bolus\n30s before using Bolus Wizard", indent='+1', adr='371'))
+                    console_error("Warning: SMB enabled with Bolus Wizard carbs: be sure to easy bolus 30s before using Bolus Wizard")
+                    enableSMB=True
+                else :
+                    Flows.append(dict(title="SMB not enabled for Bolus Wizard carbs", indent='+1', adr='374'))
+                    console_error("SMB not enabled for Bolus Wizard carbs")
+            else :
+                Flows.append(dict(title="SMB enabled for\n6h after carb entry", indent='+1', adr='377'))
+                console_error("SMB enabled for 6h after carb entry")
+                enableSMB=True
+        #// enable SMB/UAM (if enabled in preferences) if a low temptarget is set
+        elif (profile['enableSMB_with_temptarget'] == True and (profile['temptargetSet'] and target_bg < 100)) :
+            Flows.append(dict(title="SMB/UAM set\nand target_bg<100", indent='+1', adr='382'))
+            if (meal_data['bwFound']) :
+                Flows.append(dict(title="Check\nA52_risk_enable", indent='+1', adr='383'))
+                if (profile['A52_risk_enable']) :
+                    Flows.append(dict(title="Warning:\nSMB enabled within\n6h of using Bolus Wizard:\nbe sure to easy bolus\n30s before using Bolus Wizard", indent='+1', adr='384'))
+                    console_error("Warning: SMB enabled within 6h of using Bolus Wizard: be sure to easy bolus 30s before using Bolus Wizard")
+                    enableSMB=True
+                else :
+                    Flows.append(dict(title="enableSMB_with_temptarget\nnot supported\nwithin 6h of using Bolus Wizard", indent='+1', adr='387'))
+                    console_error("enableSMB_with_temptarget not supported within 6h of using Bolus Wizard")
+            else :
+                Flows.append(dict(title="SMB enabled\nfor temptarget of "+str(convert_bg(target_bg, profile)), indent='+1', adr='390'))
+                console_error("SMB enabled for temptarget of "+str(convert_bg(target_bg, profile)))
+                enableSMB=True
+        #// enable SMB/UAM if always-on (unless previously disabled for high temptarget)
+        elif (profile['enableSMB_always'] == True) :
+            Flows.append(dict(title="enableSMB_always;\nchecking for bwFound("+str(meal_data['bwFound'])+")", indent='+1', adr='395'))
+            if (meal_data['bwFound']) :
+                Flows.append(dict(title="Check\nA52_risk_enable", indent='+1', adr='396'))
+                if (profile['A52_risk_enable'] == True) :
+                    Flows.append(dict(title="Warning:\nSMB enabled within\n6h of using Bolus Wizard:\nbe sure to easy bolus\n30s before using Bolus Wizard", indent='+1', adr='397'))
+                    console_error("Warning: SMB enabled within 6h of using Bolus Wizard: be sure to easy bolus 30s before using Bolus Wizard")
+                    enableSMB=True
+                else :
+                    Flows.append(dict(title="enableSMB_with_temptarget\nnot supported\nwithin 6h of using Bolus Wizard", indent='+1', adr='400'))
+                    console_error("enableSMB_always not supported within 6h of using Bolus Wizard")
+            else :
+                Flows.append(dict(title="SMB enabled \ndue to\nenableSMB_always", indent='+1', adr='403'))
+                console_error("SMB enabled due to enableSMB_always")
+                enableSMB=True
+        else :
+            Flows.append(dict(title="SMB disabled\nno enableSMB\npreferences active", indent='+1', adr='407'))
+            console_error("SMB disabled (no enableSMB preferences active)")
+    #console_error("-- end checking advanced SMB logic ---------")
+    sens = autoISF(sens, origin_sens, target_bg, profile, glucose_status, meal_data, currentTime, autosens_data, sensitivityRatio, loop_wanted_smb, high_temptarget_raises_sensitivity, normalTarget, stepActivityDetected, stepInactivityDetected, new_parameter, Fcasts, Flows, emulAI_ratio)
     
     #lastTempAge;
     if (typeof (iob_data['lastTemp']) != 'undefined' ):
@@ -772,7 +1061,7 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
 
     #//console_error("currenttemp:",currenttemp,"lastTemp:",JSON.stringify(iob_data.lastTemp),"lastTempAge:",lastTempAge,"m");
     tempModulus = (lastTempAge + currenttemp['duration']) % 30
-    console_error("currenttemp:"+str(currenttemp)+" lastTempAge: "+str(lastTempAge)+" m tempModulus: "+str(tempModulus)+" m")
+    console_error("currenttemp: "+str(round(currenttemp['rate'],2))+" lastTempAge: "+str(lastTempAge)+" m tempModulus: "+str(tempModulus)+" m")
     rT['temp'] = 'absolute'
     rT['deliverAt'] = deliverAt
 
@@ -784,7 +1073,7 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
             return                    setTempBasal(basal, 30, profile, rT, currenttemp, Flows)
     else:
         if ( microBolusAllowed and currenttemp and iob_data['lastTemp'] and currenttemp['rate'] != iob_data['lastTemp']['rate'] and lastTempAge>10 and currenttemp['duration'] ) :
-            rT['reaso'] = "Warning: currenttemp rate "+str(currenttemp['rate'])+" != lastTemp rate "+str(iob_data['lastTemp']['rate'])+" from pumphistory; canceling temp"
+            rT['reason'] = "Warning: currenttemp rate "+str(currenttemp['rate'])+" != lastTemp rate "+str(iob_data['lastTemp']['rate'])+" from pumphistory; canceling temp"
             #eturn tempBasalFunctions.setTempBasal(0, 0, profile, rT, currenttemp);
             return                    setTempBasal(0, 0, profile, rT, currenttemp, Flows)
     
@@ -859,7 +1148,7 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
         adjustedMinBG = round(min(200, min_bg * noisyCGMTargetMultiplier ))
         adjustedTargetBG = round(min(200, target_bg * noisyCGMTargetMultiplier ))
         adjustedMaxBG = round(min(200, max_bg * noisyCGMTargetMultiplier ))
-        console_error("Raising target_bg for noisy / raw CGM data, from "+target_bg+" to "+adjustedTargetBG+"; ")
+        console_error("Raising target_bg for noisy / raw CGM data, from "+str(convert_bg(target_bg, profile))+" to "+str(convert_bg(adjustedTargetBG, profile)+"; "))
         min_bg = adjustedMinBG
         target_bg = adjustedTargetBG
         max_bg = adjustedMaxBG
@@ -874,30 +1163,30 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
         #//console_error("naive_eventualBG:",naive_eventualBG+", eventualBG:",eventualBG);
         Flows.append(dict(title='checking\nreduced MinBG\ntoo low', indent='+1',  adr='286'))
         if (eventualBG > adjustedMinBG and naive_eventualBG > adjustedMinBG and min_bg > adjustedMinBG) :
-            console_error("Adjusting targets for high BG: min_bg from "+str(min_bg)+" to "+str(adjustedMinBG)+";")
+            console_error("Adjusting targets for high BG: min_bg from "+str(convert_bg(min_bg, profile))+" to "+str(convert_bg(adjustedMinBG, profile))+";")
             min_bg = adjustedMinBG
             Flows.append(dict(title="no\nreduced min_bg("+str(min_bg)+")", indent='+1',  adr='288'))
         else :
             Flows.append(dict(title="yes\nkeep min_bg("+str(min_bg)+")", indent='+1',  adr='290'))
-            console_error("min_bg unchanged: "+str(min_bg)+";")
+            console_error("min_bg unchanged: "+str(convert_bg(min_bg, profile))+";")
         #// if eventualBG, naive_eventualBG, and target_bg aren't all above adjustedTargetBG, don’t use it
         Flows.append(dict(title='checking\nreduced TargetBG\ntoo low', indent='-1',  adr='293'))
         if (eventualBG > adjustedTargetBG and naive_eventualBG > adjustedTargetBG and target_bg > adjustedTargetBG) :
-            console_error("target_bg from "+str(target_bg)+" to "+str(adjustedTargetBG)+";")
+            console_error("target_bg from "+str(convert_bg(target_bg, profile))+" to "+str(convert_bg(adjustedTargetBG, profile))+";")
             target_bg = adjustedTargetBG
             Flows.append(dict(title="no\nreduced target_bg("+str(target_bg)+")", indent='+1', adr='295'))
         else :
             Flows.append(dict(title="yes\nkeep target_bg("+str(target_bg)+")", indent='+1', adr='297'))
-            console_error("target_bg unchanged: "+str(target_bg)+";")
+            console_error("target_bg unchanged: "+str(convert_bg(target_bg, profile))+";")
         #// if eventualBG, naive_eventualBG, and max_bg aren't all above adjustedMaxBG, don’t use it
         Flows.append(dict(title='checking\nreduced maxBG\ntoo low', indent='-1', adr='300'))
         if (eventualBG > adjustedMaxBG and naive_eventualBG > adjustedMaxBG and max_bg > adjustedMaxBG) :
             Flows.append(dict(title="no\nreduce max_bg("+str(max_bg)+")", indent='+1', adr='301'))
-            console_error("max_bg from "+str(max_bg)+" to "+str(adjustedMaxBG))
+            console_error("max_bg from "+str(convert_bg(max_bg, profile))+" to "+str(convert_bg(adjustedMaxBG, profile)))
             max_bg = adjustedMaxBG
         else :
             Flows.append(dict(title="yes\nkeep max_bg("+str(max_bg)+")", indent='+1', adr='304'))
-            console_error("max_bg unchanged: "+str(max_bg))
+            console_error("max_bg unchanged: "+str(convert_bg(max_bg, profile)))
 
     expectedDelta = calculate_expected_delta(target_bg, eventualBG, bgi)
     #if (typeof (eventualBG) == 'undefined' or isNaN(eventualBG)) :
@@ -943,94 +1232,6 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
     ZTpredBGs.append(bg)
     UAMpredBGs.append(bg)
 
-    #// enable SMB whenever we have COB or UAM is enabled
-    #// SMB is disabled by default, unless explicitly enabled in preferences.json
-    enableSMB=False
-    #// disable SMB when a high temptarget is set
-    Flows.append(dict(title='leave SMB off?', indent='0', adr='348'))
-    loop_wants_smb = loop_smb(profile, iob_data, Flows)
-    loop_wanted_smb = loop_wants_smb
-    if (microBolusAllowed and loop_wanted_smb != "AAPS") :
-        if ( loop_wanted_smb == "enforced" ) :              #// otherwise FL switched SMB off
-            enableSMB = True
-    elif AAPS_Version=='2.7' :
-        enableSMB = enable_smb(profile, microBolusAllowed, meal_data, target_bg, Flows)
-    else:
-        if (not microBolusAllowed) :
-            Flows.append(dict(title='Yes; found\nSMB not allowed', indent='+1', adr='349'))
-            console_error("SMB disabled (!microBolusAllowed)")
-        elif (not profile['allowSMB_with_high_temptarget'] and profile['temptargetSet'] and target_bg > 100) :
-            Flows.append(dict(title="Yes; SMB disabled\ndue to high temptarget of "+str(target_bg), indent='+1', adr='351'))
-            console_error("SMB disabled due to high temptarget of "+str(target_bg))
-            enableSMB=False
-        #// enable SMB/UAM (if enabled in preferences) while we have COB
-        elif (profile['enableSMB_with_COB'] == True and meal_data['mealCOB']) :
-            Flows.append(dict(title="Check bwCarbs", indent='+1', adr='355'))
-            if (meal_data['bwCarbs']) :
-                Flows.append(dict(title="Check\nA52_risk_enable", indent='+1', adr='356'))
-                if (profile['A52_risk_enable']) :
-                    Flows.append(dict(title="Warning:\nSMB enabled with Bolus Wizard carbs:\nbe sure to easy bolus\n30s before using Bolus Wizard", indent='+1', adr='357'))
-                    console_error("Warning: SMB enabled with Bolus Wizard carbs: be sure to easy bolus 30s before using Bolus Wizard")
-                    enableSMB=True
-                else :
-                    Flows.append(dict(title="SMB not enabled\nfor Bolus Wizard COB", indent='+1', adr='360'))
-                    console_error("SMB not enabled for Bolus Wizard COB")
-            else :
-                Flows.append(dict(title="SMB enabled for COB of "+str(round(meal_data['mealCOB'],2)), indent='+1', adr='363'))
-                console_error("SMB enabled for COB of "+str(meal_data['mealCOB']))
-                enableSMB=True
-        #// enable SMB/UAM (if enabled in preferences) for a full 6 hours after any carb entry
-        #// (6 hours is defined in carbWindow in lib/meal/total.js)
-        elif (profile['enableSMB_after_carbs'] == True and meal_data['carbs'] ) :
-            Flows.append(dict(title="Check bwCarbs", indent='+1', adr='369'))
-            if (meal_data['bwCarbs']) :
-                Flows.append(dict(title="Check\nA52_risk_enable", indent='+1', adr='370'))
-                if (profile['A52_risk_enable']) :
-                    Flows.append(dict(title="Warning:\nSMB enabled with Bolus Wizard carbs:\nbe sure to easy bolus\n30s before using Bolus Wizard", indent='+1', adr='371'))
-                    console_error("Warning: SMB enabled with Bolus Wizard carbs: be sure to easy bolus 30s before using Bolus Wizard")
-                    enableSMB=True
-                else :
-                    Flows.append(dict(title="SMB not enabled for Bolus Wizard carbs", indent='+1', adr='374'))
-                    console_error("SMB not enabled for Bolus Wizard carbs")
-            else :
-                Flows.append(dict(title="SMB enabled for\n6h after carb entry", indent='+1', adr='377'))
-                console_error("SMB enabled for 6h after carb entry")
-                enableSMB=True
-        #// enable SMB/UAM (if enabled in preferences) if a low temptarget is set
-        elif (profile['enableSMB_with_temptarget'] == True and (profile['temptargetSet'] and target_bg < 100)) :
-            Flows.append(dict(title="SMB/UAM set\nand target_bg<100", indent='+1', adr='382'))
-            if (meal_data['bwFound']) :
-                Flows.append(dict(title="Check\nA52_risk_enable", indent='+1', adr='383'))
-                if (profile['A52_risk_enable']) :
-                    Flows.append(dict(title="Warning:\nSMB enabled within\n6h of using Bolus Wizard:\nbe sure to easy bolus\n30s before using Bolus Wizard", indent='+1', adr='384'))
-                    console_error("Warning: SMB enabled within 6h of using Bolus Wizard: be sure to easy bolus 30s before using Bolus Wizard")
-                    enableSMB=True
-                else :
-                    Flows.append(dict(title="enableSMB_with_temptarget\nnot supported\nwithin 6h of using Bolus Wizard", indent='+1', adr='387'))
-                    console_error("enableSMB_with_temptarget not supported within 6h of using Bolus Wizard")
-            else :
-                Flows.append(dict(title="SMB enabled\nfor temptarget of "+str(convert_bg(target_bg, profile)), indent='+1', adr='390'))
-                console_error("SMB enabled for temptarget of "+str(convert_bg(target_bg, profile)))
-                enableSMB=True
-        #// enable SMB/UAM if always-on (unless previously disabled for high temptarget)
-        elif (profile['enableSMB_always'] == True) :
-            Flows.append(dict(title="enableSMB_always;\nchecking for bwFound("+str(meal_data['bwFound'])+")", indent='+1', adr='395'))
-            if (meal_data['bwFound']) :
-                Flows.append(dict(title="Check\nA52_risk_enable", indent='+1', adr='396'))
-                if (profile['A52_risk_enable'] == True) :
-                    Flows.append(dict(title="Warning:\nSMB enabled within\n6h of using Bolus Wizard:\nbe sure to easy bolus\n30s before using Bolus Wizard", indent='+1', adr='397'))
-                    console_error("Warning: SMB enabled within 6h of using Bolus Wizard: be sure to easy bolus 30s before using Bolus Wizard")
-                    enableSMB=True
-                else :
-                    Flows.append(dict(title="enableSMB_with_temptarget\nnot supported\nwithin 6h of using Bolus Wizard", indent='+1', adr='400'))
-                    console_error("enableSMB_always not supported within 6h of using Bolus Wizard")
-            else :
-                Flows.append(dict(title="SMB enabled \ndue to\nenableSMB_always", indent='+1', adr='403'))
-                console_error("SMB enabled due to enableSMB_always")
-                enableSMB=True
-        else :
-            Flows.append(dict(title="SMB disabled\nno enableSMB\npreferences active", indent='+1', adr='407'))
-            console_error("SMB disabled (no enableSMB preferences active)")
     #// enable UAM (if enabled in preferences)
     enableUAM=(profile['enableUAM'])
 
@@ -1053,7 +1254,7 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
         #// so that autotuned CR is still in effect even when basals and ISF are being adjusted by autosens
         Flows.append(dict(title='False; use autosens-adjusted sens\nto counteract \nmeal insulin dosing adjustments', indent='+1', adr='428'))
         csf = sens / profile['carb_ratio']
-    console_error("profile.sens:",short(profile['sens']),"sens:",short(sens),"CSF:",csf);
+    console_error("profile.sens:",short(round(profile['sens'],1)),"sens:",short(round(sens,1)),"CSF:",round(csf,2));
     maxCarbAbsorptionRate = 30      #// g/h; maximum rate to assume carbs will absorb if no CI observed
     #// limit Carb Impact to maxCarbAbsorptionRate * csf in mg/dL per 5m
     maxCI = round(maxCarbAbsorptionRate*csf*5/60,1)
@@ -1463,18 +1664,18 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
     Flows.append(dict(title=str(minPredBG)+"; use min of\nminPredBG("+str(minPredBG)+")\navgPredBG("+str(avgPredBG)+")", indent='+1', adr='767'))
 
     Levels = {}
-    console_error("minPredBG: "+str(minPredBG)+" minIOBPredBG: "+str(minIOBPredBG)+" minZTGuardBG: "+str(minZTGuardBG))
+    console_error("minPredBG:", minPredBG, "minIOBPredBG:", minIOBPredBG, "minZTGuardBG:", minZTGuardBG)
     Levels['eventualBG'] = eventualBG
     Levels['minPredBG'] = minPredBG
     Levels['minIOBPredBG'] = minIOBPredBG
     Levels['minZTGuardBG'] = minZTGuardBG
     if (minCOBPredBG < 999) :
-        console_error("minCOBPredBG: "+str(minCOBPredBG))
+        console_error("minCOBPredBG:", minCOBPredBG)
         Levels['minCOBPredBG'] = minCOBPredBG
     if (minUAMPredBG < 999) :
-        console_error("minUAMPredBG: "+str(minUAMPredBG))
+        console_error("minUAMPredBG:", minUAMPredBG)
         Levels['minUAMPredBG'] = minUAMPredBG
-    console_error("avgPredBG:",avgPredBG,"COB:",meal_data['mealCOB'],"/",meal_data['carbs'])
+    console_error("avgPredBG:", avgPredBG, "COB:",meal_data['mealCOB'],"/",meal_data['carbs'])
     Levels['avgPredBG'] = avgPredBG
     #// But if the COB line falls off a cliff, don't trust UAM too much:
     #// use maxCOBPredBG if it's been set and lower than minPredBG
@@ -1485,7 +1686,7 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
     rT['COB']=meal_data['mealCOB']
     rT['IOB']=iob_data['iob']           ##### check this !!   ################################################
     
-    rT['reason']="COB: " + str(round(meal_data['mealCOB'],1)) + ", Dev: " + str(convert_bg(deviation, profile)) + ", BGI: " + str(convert_bg(bgi, profile)) + ", ISF: " + str(convert_bg(sens, profile)) + ", CR: " + str(round(profile['carb_ratio'], 2)) + ", Target: " + str(convert_bg(target_bg, profile)) + ", minPredBG " + str(convert_bg(minPredBG, profile)) + ", minGuardBG " + str(convert_bg(minGuardBG, profile)) + ", IOBpredBG " + str(convert_bg(lastIOBpredBG, profile))
+    rT['reason']="COB: " + str(round(meal_data['mealCOB'],1)) + ", Dev: " + str(convert_bg(deviation, profile)) + ", BGI: " + str(short(convert_bg(bgi, profile))) + ", ISF: " + str(short(convert_bg(sens, profile))) + ", CR: " + str(round(profile['carb_ratio'], 2)) + ", Target: " + str(short(convert_bg(target_bg, profile))) + ", minPredBG " + str(convert_bg(minPredBG, profile)) + ", minGuardBG " + str(convert_bg(minGuardBG, profile)) + ", IOBpredBG " + str(convert_bg(lastIOBpredBG, profile))
     if (lastCOBpredBG > 0) :
         rT['reason'] += ", COBpredBG " + str(convert_bg(lastCOBpredBG, profile))
     if (lastUAMpredBG > 0) :
@@ -1541,7 +1742,7 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
     Fcasts['Levels'] = Levels
                     
     if (enableSMB and minGuardBG < threshold) :
-        console_error("minGuardBG "+str(convert_bg(minGuardBG, profile))+" projected below "+str(convert_bg(threshold, profile))+" - disabling SMB")
+        console_error("minGuardBG "+str(short(convert_bg(minGuardBG, profile)))+" projected below "+str(short(convert_bg(threshold, profile)))+" - disabling SMB")
         #//rT.reason += "minGuardBG "+minGuardBG+"<"+threshold+": SMB disabled; ";
         enableSMB = False
         Flows.append(dict(title="disabled SMB because\nminGuardBG("+str(minGuardBG)+")   \n   < threshold("+str(threshold)+")", indent='0', adr='839'))
@@ -1558,21 +1759,30 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
             Fcasts['Levels']['minGuardBG'] = minGuardBG
         
     #f ( maxDelta > 0.20 * bg ) : # why is this critical? if we are rising that fast we need SMB !  ###########################################
-    if ( maxDelta > new_parameter['maxDeltaRatio'] * bg ) :                                         ##### allow this change via new_ parameter
-        console_error("maxDelta "+str(convert_bg(maxDelta, profile))+" > "+str(100*new_parameter['maxDeltaRatio'])+"% of BG "+str(convert_bg(bg, profile))+" - disabling SMB")      ####
-        rT['reason'] += "maxDelta "+str(convert_bg(maxDelta, profile))+" > "+str(100*new_parameter['maxDeltaRatio'])+"% of BG "+str(convert_bg(bg, profile))+": SMB disabled;"      ####
+    #if gz_proto:
+    if (loop_wanted_smb=='fullLoop') :
+        maxDeltaPercentage = 0.3
+    elif 'maxDeltaRatio' in new_parameter:
+        maxDeltaPercentage = new_parameter['maxDeltaRatio']
+    else:
+        maxDeltaPercentage = 0.2            # gz half power loop
+    #elif 'cgmFlatMinutes' in glucose_status:   # not active in in public master - ba mistake?
+    #    maxDeltaPercentage = 0.3                # for autoISF  2.2.8
+    if ( maxDelta > maxDeltaPercentage * bg ) :                                         ##### allow this change via new_ parameter
+        console_error("maxDelta "+str(convert_bg(maxDelta, profile))+" > "+str(100*maxDeltaPercentage)+"% of BG "+str(convert_bg(bg, profile))+" - disabling SMB")    ####
+        rT['reason'] += "maxDelta "+str(convert_bg(maxDelta, profile))+" > "+str(100*maxDeltaPercentage)+"% of BG "+str(convert_bg(bg, profile))+": SMB disabled;"      ####
         enableSMB = False
-        Flows.append(dict(title="disabled SMB because\nmaxDelta > "+str(new_parameter['maxDeltaRatio'])+" * bg("+str(bg)+")", indent='0', adr='844+1'))
-        Fcasts['Levels']['SMBoff'] = 'maxDelta('+str(maxDelta)+') >   \n   '+str(100*new_parameter['maxDeltaRatio'])+'% of bg('+str(bg)+')'
+        Flows.append(dict(title="disabled SMB because\nmaxDelta > "+str(maxDeltaPercentage)+" * bg("+str(bg)+")", indent='0', adr='844+1'))
+        Fcasts['Levels']['SMBoff'] = 'maxDelta('+str(maxDelta)+') >   \n   '+str(100*maxDeltaPercentage)+'% of bg('+str(bg)+')'
         Fcasts['Levels']['type'] = 'maxDelta'
-        Fcasts['Levels']['value'] = ( 1 - new_parameter['maxDeltaRatio'] ) * bg
+        Fcasts['Levels']['value'] = ( 1 - maxDeltaPercentage ) * bg
         Fcasts['Levels']['minGuardBG1'] = bg
         Fcasts['Levels']['source'] = 'bg'
         Fcasts['Levels']['timePos'] = 0
 
-    console_error("BG projected to remain above", convert_bg(min_bg, profile), "for", minutesAboveMinBG, "minutes")
+    console_error("BG projected to remain above", short(convert_bg(min_bg, profile)), "for", minutesAboveMinBG, "minutes")
     if ( minutesAboveThreshold < 240 or minutesAboveMinBG < 60 ) :
-        console_error("BG projected to remain above", convert_bg(threshold,profile), "for", minutesAboveThreshold, "minutes")
+        console_error("BG projected to remain above", short(convert_bg(threshold,profile)), "for", minutesAboveThreshold, "minutes")
         Flows.append(dict(title="BG projected to remain\nabove "+str(convert_bg(threshold,profile))+" for "+str(minutesAboveThreshold)+" minutes", indent='+1', adr='930'))
     #// include at least minutesAboveThreshold worth of zero temps in calculating carbsReq
     #// always include at least 30m worth of zero temp (carbs to 80, low temp up to target)
@@ -1585,7 +1795,7 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
     carbsReq = (bgUndershoot - zeroTempEffect) / csf - COBforCarbsReq
     zeroTempEffect = round(zeroTempEffect)
     carbsReq = round(carbsReq)
-    console_error("naive_eventualBG:", naive_eventualBG, "bgUndershoot:", short(bgUndershoot), "zeroTempDuration:", zeroTempDuration, "zeroTempEffect:", zeroTempEffect, "carbsReq:", carbsReq)
+    console_error("naive_eventualBG:", naive_eventualBG, "bgUndershoot:", short(round(bgUndershoot,1)), "zeroTempDuration:", zeroTempDuration, "zeroTempEffect:", zeroTempEffect, "carbsReq:", carbsReq)
     Fcasts['Levels']['naive_eventualBG'] = naive_eventualBG
     if ( carbsReq >= profile['carbsReqThreshold'] and minutesAboveThreshold <= 45 ) :
         rT['carbsReq'] = carbsReq
@@ -1598,7 +1808,7 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
         rT['reason'] += " and minDelta " + str(convert_bg(minDelta, profile)) + " > " + "expectedDelta " + str(convert_bg(expectedDelta, profile)) + "; "
     #// predictive low glucose suspend mode: BG is / is projected to be < threshold
     elif  ( bg < threshold or minGuardBG < threshold ) :
-        rT['reason'] += "minGuardBG " + str(convert_bg(minGuardBG, profile)) + "<" + str(convert_bg(threshold, profile))
+        rT['reason'] += "minGuardBG " + str(convert_bg(minGuardBG, profile)) + "<" + str(short(convert_bg(threshold, profile)))
         bgUndershoot = target_bg - minGuardBG
         worstCaseInsulinReq = bgUndershoot / sens
         durationReq = round(60*worstCaseInsulinReq / profile['current_basal'])
@@ -1620,9 +1830,9 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
             return                    setTempBasal(0, 0, profile, rT, currenttemp, Flows)
 
     if new_parameter['insulinCapBelowTarget'] and bg<target_bg and target_bg<95 and thisTime > 1602512247000:
-        insReqOffset = round((1-bg/target_bg) * 5.0 * new_parameter['CapFactor'], 1)
+        insReqOffset = round((1-bg/target_bg) * 5.0 * 8, 1)
         Flows.append(dict(title="Cap insulinReq = True\nvirtual target +"+str(insReqOffset), indent='0', adr='884-1'))
-        console_error("mod12: Cap insulinReq = True; virtual target", insReqOffset);
+        console_error("gz Cap insulinReq = True; virtual target +", insReqOffset);
     else:
         insReqOffset = 0        
     if (eventualBG < min_bg) :      #// if eventual BG is below target:
@@ -1642,8 +1852,8 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
                 Flows.append(dict(title="but Delta " + tick + " > expectedDelta " + str(convert_bg(expectedDelta, profile)), indent='+1', adr='891+1'))
             else :
                 #rT['reason'] += ", but Min. Delta " + str(minDelta.toFixed(2)) + " > Exp. Delta " + str(convert_bg(expectedDelta, profile))
-                rT['reason'] += ", but Min. Delta " + str(round(minDelta,2)) + " > Exp. Delta " + str(convert_bg(expectedDelta, profile))
-                Flows.append(dict(title="but Min. Delta " + str(round(minDelta,2)) + " > Exp. Delta " + str(convert_bg(expectedDelta, profile)), indent='+1', adr='894+1'))
+                rT['reason'] += ", but Min. Delta " + str(round(minDelta,2)) + " > Exp. Delta " + str(short(convert_bg(expectedDelta, profile)))
+                Flows.append(dict(title="but Min. Delta " + str(round(minDelta,2)) + " > Exp. Delta " + str(short(convert_bg(expectedDelta, profile))), indent='+1', adr='894+1'))
             if (currenttemp['duration'] > 15 and (round_basal(basal, profile) == round_basal(currenttemp['rate'], profile))) :
                 rT['reason'] += ", temp " + str(currenttemp['rate']) + " ~ req " + str(basal) + "U/hr. "
                 Flows.append(dict(title="temp " + str(currenttemp['rate']) + " ~ req " + str(basal) + "U/hr", indent='+1', adr='898+1'))
@@ -1688,7 +1898,7 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
             Flows.append(dict(title="current temp is\na lot less than needed", indent='+1', adr='931+1'))
             return                    setTempBasal(rate, 30, profile, rT, currenttemp, Flows)
         if (typeof (currenttemp) != 'undefined' and (currenttemp['duration'] > 5 and rate >= currenttemp['rate'] * 0.8)) :
-            rT['reason'] += ", temp " + str(currenttemp['rate']) + " ~< req " + str(rate) + "U/hr. "
+            rT['reason'] += ", temp " + str(currenttemp['rate']) + " ~< req " + str(round(rate,2)) + "U/hr. "
             Flows.append(dict(title="current temp\nis close to need", indent='+1', adr='935+1'))
             Flows.append(dict(title="R E T U R N\nset rate="+str(currenttemp['rate'])+" ?\nduration="+str(currenttemp['duration'])+" ?", indent='+0', adr='936+1'))
             return rT
@@ -1725,11 +1935,11 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
         if (not (microBolusAllowed and enableSMB)) :
             Flows.append(dict(title="not in\nSMB mode", indent='+1', adr='967+1'))
             if (glucose_status['delta'] < minDelta) :
-                rT['reason'] += "Eventual BG " + str(convert_bg(eventualBG, profile)) + " > " + str(convert_bg(min_bg, profile)) + " but Delta " + str(convert_bg(tick, profile)) + " < Exp. Delta " + str(convert_bg(expectedDelta, profile))
-                Flows.append(dict(title="Eventual BG(" + str(convert_bg(eventualBG, profile)) + ")   \n   > min_bg(" + str(convert_bg(min_bg, profile)) + ")\nbut\nDelta(" + tick + ") < Exp. Delta[" + str(convert_bg(expectedDelta, profile))+')', indent='+1', adr='968+1'))
+                rT['reason'] += "Eventual BG " + str(convert_bg(eventualBG, profile)) + " > " + str(convert_bg(min_bg, profile)) + " but Delta " + str(convert_bg(tick, profile)) + " < Exp. Delta " + str(short(convert_bg(expectedDelta, profile)))
+                Flows.append(dict(title="Eventual BG(" + str(convert_bg(eventualBG, profile)) + ")   \n   > min_bg(" + str(convert_bg(min_bg, profile)) + ")\nbut\nDelta(" + tick + ") < Exp. Delta[" + str(short(convert_bg(expectedDelta, profile)))+')', indent='+1', adr='968+1'))
             else :
-                rT['reason'] += "Eventual BG " + str(convert_bg(eventualBG, profile)) + " > " + str(convert_bg(min_bg, profile)) + " but Min. Delta " + str(round(minDelta,2) )+ " < Exp. Delta " + str(convert_bg(expectedDelta, profile))
-                Flows.append(dict(title="Eventual BG(" + str(convert_bg(eventualBG, profile)) + ") > min_bg(" + str(convert_bg(min_bg, profile)) + ")\nbut\nMin. Delta(" + str(round(minDelta,2) )+ ") < Exp. Delta(" + str(convert_bg(expectedDelta, profile))+')', indent='+1', adr='970+1'))
+                rT['reason'] += "Eventual BG " + str(convert_bg(eventualBG, profile)) + " > " + str(convert_bg(min_bg, profile)) + " but Min. Delta " + str(round(minDelta,2) )+ " < Exp. Delta " + str(short(convert_bg(expectedDelta, profile)))
+                Flows.append(dict(title="Eventual BG(" + str(convert_bg(eventualBG, profile)) + ") > min_bg(" + str(convert_bg(min_bg, profile)) + ")\nbut\nMin. Delta(" + str(round(minDelta,2) )+ ") < Exp. Delta(" + str(short(convert_bg(expectedDelta, profile)))+')', indent='+1', adr='970+1'))
             if (currenttemp['duration'] > 15 and (round_basal(basal, profile) == round_basal(currenttemp['rate'], profile))) :
                 rT['reason'] += ", temp " + str(currenttemp['rate']) + " ~ req " + str(basal) + "U/hr. "
                 Flows.append(dict(title="R E T U R N\currenttemp(" + str(currenttemp['rate']) + ")   \n   ~ req (" + str(basal) + ") U/hr.", indent='+0', adr='974+1'))
@@ -1793,6 +2003,7 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
         if (insulinReq > max_iob-iob_data['iob']) :
             rT['reason'] += "max_iob " + str(max_iob) + ", "
             Flows.append(dict(title="max_iob(" + str(max_iob)+") violation\nreduce insulinReq("+str(insulinReq)+") to "+ str(round(max_iob-iob_data['iob'],2)), indent='+1', adr='1027+1'))
+            console_error("InsReq", round(insulinReq,2), "capped at", round(max_iob-iob_data['iob'],2), "to not exceed max_iob")
             insulinReq = max_iob-iob_data['iob']
 
         #// rate required to deliver insulinReq more insulin over 30m:
@@ -1805,13 +2016,11 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
             #print('capInsulin timing still wrong\n', str(thisTime),'\n>1602512247000')
             rate = basal + (2 * insulinReq)
             rate = round_basal(rate, profile)
-            insulinReq = capInsulin(insulinReq, target_bg, bg, new_parameter['insulinCapBelowTarget'], new_parameter['CapFactor'], Flows)          #### GZ mod4b: reduce overnight insulin; leave it here to ba compatible with wrong position in 2.7 actual
+            insulinReq = capInsulin(insulinReq, target_bg, bg, new_parameter['insulinCapBelowTarget'], Flows)          #### GZ mod4b: reduce overnight insulin; leave it here to ba compatible with wrong position in 2.7 actual
         insulinReq = round(insulinReq,3)
         rT['insulinReq'] = insulinReq
-        #//console_error(iob_data.lastBolusTime);
-        #// minutes since last bolus
-        lastBolusAge = round(( thisTime - iob_data['lastBolusTime'] ) / 60000,1)
-        #//console_error(lastBolusAge);
+        #// console_error('lastBolusTime:', str(iob_data['lastBolusTime']))
+        lastBolusAge = ( thisTime - iob_data['lastBolusTime'] ) / 1000
         #//console_error(profile.temptargetSet, target_bg, rT.COB);
         #// only allow microboluses with COB or low temp targets, or within DIA hours of a bolus
         if (microBolusAllowed and enableSMB and bg > threshold) :
@@ -1879,7 +2088,7 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
                         Flows.append(dict(title="maxUAMSMBBasalMinutes\not given, use 30mins\nand current_basal\nto define maxBolus=" + str(maxBolus), indent='+1', adr='1052+6'))
                 else :
                     console_error("profile.maxSMBBasalMinutes:",profile['maxSMBBasalMinutes'],"profile.current_basal:",profile['current_basal'])
-                    uplift = new_parameter['maxBolusTargetRatio']                                                   #### incl. GZ mod1
+                    #uplift = new_parameter['maxBolusTargetRatio']                                                   #### incl. GZ mod1
                     maxBolus = round(uplift * profile['current_basal'] * profile['maxSMBBasalMinutes'] / 60 ,1)     #### incl. GZ mod1
                     Flows.append(dict(title="from\nmaxSMBBasalMinutes("+str(profile['maxSMBBasalMinutes'])+")\nsetting maxBolus=" + str(maxBolus), indent='+1', adr='1053+10'))
                     #console_error("gz maximSMB: from currentBasal & maxSMBmBasalMinutes")                          #### incl. GZ mod1
@@ -1889,23 +2098,29 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
             roundSMBTo = 1 / bolus_increment
             #was: microBolus = int(min(insulinReq * new_parameter['SMBRatio'], maxBolus)*10)/10                   #### incl. GZ mod2: master was 0.5
             #// gz md 10: make the share of InsulinReq a user input
-            smb_ratio = determine_varSMBratio(profile, bg, target_bg, Flows)    # gz mod 12: linear function ...
+            smb_ratio = determine_varSMBratio(profile, bg, target_bg, loop_wanted_smb, Flows)    # gz mod 12: linear function ...
+            if "key_use_AIMI_CAP" in profile:   
+                if (profile["key_use_AIMI_CAP"] < maxBolus) :
+                    console_error("capping maxBolus from", maxBolus, "to",profile["key_use_AIMI_CAP"],"for Lyumjev max. dose")
+                    maxBolus = min(maxBolus, profile["key_use_AIMI_CAP"])       # use as upper Lyumjev dose
             microBolus = min(insulinReq*smb_ratio, maxBolus)
             #Flows.append(dict(title="checking SMB "+str(round(microBolus,2))+ "\nto not exceed 120%\nof iobTH "+str(profile['iob_threshold_percent']+"% ?"), indent='0', adr='1053+y0'))
-            iobTHtolerance = new_parameter['iobTHtolerance']                    # adapt in VDF to various development phases: 100/120/130
-            iobTHvirtual = profile['iob_threshold_percent']*iobTHtolerance/10000 * profile['max_iob']*profile['profile_percentage']/100
-            if (microBolus > iobTHvirtual - iob_data['iob'] and loop_wanted_smb == "enforced") :
+            #iobTHtolerance = new_parameter['iobTHtolerance']                    # adapt in VDF to various development phases: 100/120/130
+            #iobTHvirtual = profile['iob_threshold_percent']*iobTHtolerance/10000 * profile['max_iob']*iobTH_reduction_ratio
+            if (loop_wanted_smb=="enforced" and profile['iob_threshold_percent']<100 and profile['meal_addon']>0):
+                iobTHvirtual = iobTHvirtual / 2 #// half power w/o Full Loop
+            if (microBolus > iobTHvirtual - iob_data['iob'] and use_iobTH and ( loop_wanted_smb == "fullLoop" or loop_wanted_smb=="enforced")) :
                 microBolus = iobTHvirtual - iob_data['iob']
-                console_error("Full loop limited SMB "+str(round(microBolus,2))+ " to not exceed "+str(iobTHtolerance)+"% of effective iobTH "+str(profile['iob_threshold_percent']*profile['profile_percentage']/100)+"%")
-                Flows.append(dict(title="Full loop limited SMB "+str(round(microBolus,2))+ "\nto not exceed "+str(iobTHtolerance)+"%\nof effective iobTH "+str(profile['iob_threshold_percent']*profile['profile_percentage']/100), indent='+1', adr='1053+y3'))
+                console_error("Loop capped SMB at "+str(round(microBolus,2))+ " to not exceed "+str(iobTHtolerance)+"% of effective iobTH "+str(round(iobTHvirtual/iobTHtolerance*100,2))+"U")
+                Flows.append(dict(title="Loop limited SMB "+str(round(microBolus,2))+ "\nto not exceed "+str(iobTHtolerance)+"%\nof effective iobTH "+str(round(iobTHvirtual/iobTHtolerance*100,2))+"U", indent='+1', adr='1053+y3'))
             #  reduce SMB only if COB==0 (not yet in master js)    ... and IOB>0 ???
             #if new_parameter['LessSMBatModerateBG'] and bg<new_parameter['LessSMBbelow'] \
             #  and meal_data['mealCOB']==0:  # and iob_data['iob']>=0:  #### test limit of 95
-            if new_parameter['LessSMBatModerateBG'] and bg<new_parameter['LessSMBbelow']:  # and iob_data['iob']>=0:  #### test limit of 95
+            if gz_proto and bg<new_parameter['LessSMBbelow']:  # and iob_data['iob']>=0:  #### test limit of 95
                 LessSMBratio = round(min(1, new_parameter['LessSMBFactor']*(1 - bg/new_parameter['LessSMBbelow'])), 2)
                 microBolus = microBolus * (1-LessSMBratio)
-                console_error("modX: SMB reduced by " + str(100*LessSMBratio) + "% because bg("+str(bg)+") is below "+str(new_parameter['LessSMBbelow']))
-                Flows.append(dict(title="modX: microBolus reduced\nby " + str(100*LessSMBratio) + "% to "+str(round(microBolus,2))+"\nbecause bg("+str(bg)+") is below "+str(round(new_parameter['LessSMBbelow'],0)), indent='0', adr='1053+x'))
+                console_error("gz SMB reduced by " + str(short(100*LessSMBratio)) + "% because bg("+str(bg)+") is below upper target("+str(max_bg)+")+10")
+                Flows.append(dict(title="modX: microBolus reduced\nby " + str(100*LessSMBratio) + "% to "+str(round(microBolus,2))+"\nbecause bg("+str(convert_bg(bg, profile))+") is below "+str(round(new_parameter['LessSMBbelow'],0)), indent='0', adr='1053+x'))
             microBolus = int(microBolus*roundSMBTo+0.0001)/roundSMBTo                       ### round it up, e.g. from 0.29999 to 0.3
             #// calculate a long enough zero temp to eventually correct back up to target
             smbTarget = target_bg
@@ -1948,19 +2163,21 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
             if 'SMBInterval' in profile :
                 #// allow SMBIntervals between 1 and 10 minutes
                 SMBInterval = min(10, max(1,profile['SMBInterval']))
-
-            nextBolusMins = int(SMBInterval-lastBolusAge)                           # round(SMBInterval-lastBolusAge,1)
-            nextBolusSeconds = round((SMBInterval - lastBolusAge) * 60, 0) % 60
+            SMBInterval = SMBInterval * 60
             #//console_error(naive_eventualBG, insulinReq, worstCaseInsulinReq, durationReq);
-            console_error("naive_eventualBG "+str(naive_eventualBG)+", "+str(durationReq)+"m "+str(smbLowTempReq)+"U/h temp needed; last bolus "+str(lastBolusAge)+"m ago; maxBolus:", maxBolus)
-            if (lastBolusAge > SMBInterval) :
+            console_error("naive_eventualBG "+str(naive_eventualBG)+", "+str(durationReq)+"m "+str(smbLowTempReq)+"U/h temp needed; last bolus "+str(short(round(lastBolusAge/60,1)))+"m ago; maxBolus:", maxBolus)
+            if (lastBolusAge > SMBInterval - 6) :     #// 6s tolerance
                 if (microBolus > 0) :
                     rT['units'] = microBolus
-                    rT['reason'] += "Microbolusing " + str(microBolus) + "U. "
+                    rT['reason'] += "Microbolusing " + str(short(microBolus)) + "U. "
                     Flows.append(dict(title="Microbolusing " + str(round(microBolus,1)) + "U", indent='0', adr='1095+12'))
             else :
-                rT['reason'] += "Waiting " + str(nextBolusMins) + "m " + str(nextBolusSeconds) + "s to microbolus again. "
-                Flows.append(dict(title="Waiting " + str(nextBolusMins) + ":"+str(nextBolusSeconds+100)[1:3]+"\nto microbolus again", indent='0', adr='1098+12'))
+                nextBolusMins = (SMBInterval-lastBolusAge) / 60 
+                nextBolusSeconds = (SMBInterval - lastBolusAge) % 60
+                waitingSeconds = round(nextBolusSeconds,0) % 60
+                waitingMins = round(nextBolusMins-waitingSeconds/60, 0)
+                rT['reason'] += "Waiting " + str(short(waitingMins)) + "m " + str(short(waitingSeconds)) + "s to microbolus again. "
+                Flows.append(dict(title="Waiting " + str(waitingMins) + ":"+str(waitingSeconds+100)[1:3]+"\nto microbolus again", indent='0', adr='1098+12'))
             #//rT.reason += ". ";
 
             #// if no zero temp is required, don't return yet; allow later code to set a high temp
@@ -1985,7 +2202,7 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
         
         insulinScheduled = currenttemp['duration'] * (currenttemp['rate'] - basal) / 60
         if (insulinScheduled >= insulinReq * 2) :   #// if current temp would deliver >2x more than the required insulin, lower the rate
-            rT['reason'] += str(currenttemp['duration']) + "m@" + str(round(currenttemp['rate'],2)) + " > 2 * insulinReq. Setting temp basal of " + str(rate) + "U/hr. "
+            rT['reason'] += str(currenttemp['duration']) + "m@" + str(round(currenttemp['rate'],2)) + " > 2 * insulinReq. Setting temp basal of " + long2(rate) + "U/hr. "
             Flows.append(dict(title="current temp("+str(round(currenttemp['rate'],2))+")\nwould deliver >2x\nthe required insulin\nlower the rate", indent='0', adr='1125+12'))
             #eturn tempBasalFunctions.setTempBasal(rate, 30, profile, rT, currenttemp)
             return                    setTempBasal(rate, 30, profile, rT, currenttemp, Flows)
@@ -1997,14 +2214,14 @@ def determine_basal(glucose_status, currenttemp, iob_data, profile, autosens_dat
             return                    setTempBasal(rate, 30, profile, rT, currenttemp, Flows)
 
         if (currenttemp['duration'] > 5 and (round_basal(rate, profile) <= round_basal(currenttemp['rate'], profile))) :    #// if required temp <~ existing temp basal
-            rT['reason'] += "temp " + str(currenttemp['rate']) + " >~ req " + str(rate) + "U/hr. "
+            rT['reason'] += "temp " + str(long2(currenttemp['rate'])) + " >~ req " + str(rate) + "U/hr. "
             Flows.append(dict(title="required temp("+str(rate)+")\n<~ existing temp("+str(round(currenttemp['rate'],3))+")", indent='0', adr='1135+12'))
             Flows.append(dict(title="R E T U R N\nkeep rate="+str(round(currenttemp['rate'],2))+" ?\nduration="+str(currenttemp['duration'])+" ?", indent='+0', adr='1136+12'))
             return rT
         
         #// required temp > existing temp basal
-        rT['reason'] += "temp " + str(currenttemp['rate']) + "<" + str(rate) + "U/hr. "
+        rT['reason'] += "temp " + long2(currenttemp['rate']) + " < " + long2(rate) + "U/hr. "
         #eturn tempBasalFunctions.setTempBasal(rate, 30, profile, rT, currenttemp)
-        Flows.append(dict(title="required temp("+str(rate)+")\n> existing temp("+str(round(currenttemp['rate'],3))+")", indent='0', adr='1140+12'))
+        Flows.append(dict(title="required temp("+str(rate)+")\n> existing temp("+long2(currenttemp['rate'])+")", indent='0', adr='1140+12'))
         return                    setTempBasal(rate, 30, profile, rT, currenttemp, Flows)
 

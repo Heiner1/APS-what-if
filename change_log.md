@@ -1,3 +1,48 @@
+05.Jun.2924
+===========
+Activity Monitor sleeping hours need to be shifted from local time to UTC.
+The UTC offset is extracted from the logfiles.
+
+
+02.Jun.2024
+===========
+Re-enabled output of DELTA file
+
+
+May 2024
+========
+Adapted for APPS 3.2.0.4
+Adapted for autoISF3.0.1
+Documentation
+- added usage guide for emualtor on phone
+- Libre Office proforma for importing CSV file now has color coded cells when 'orig' and 'emul' deviate
+
+
+25.Nov.2023
+===========
+Adapted for autoISF3.0
+Adapted for AAPS 3.2.0.2
+
+
+12.Apr.2023
+===========
+Adapted for autoISF 2.2.8.1
+New capabilities
+ - added commands to define circumdian profiles for lower and higher targets
+ - new interface on Android to avoid Android13 problems
+ - result files base name is now the start time of the evaluation window if given; this avoids oevrwring results for several time windows on the same day
+Documentation
+ - new guide for installing the emulator
+ - new detailed guide for VDF instructions
+ - several How-To guides (in progress)
+General improvements
+ - faster execution by skipping logfiles older than the emulation time window
+ - the "no change" scenario can now be actived automatically by an empty VDF file
+ - unify naming to call it "emulator" in line with general references instead of "what-if"
+Bug fixes
+ - runnnig on the APS phone it will no longer hang up when the active logfile is recycled while trýing to read it
+
+
 05.Sep.2022
 ===========
 Adapted for autoISF version 2.2.7

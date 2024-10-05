@@ -1,16 +1,18 @@
 import sys
 import os
 import glob
+import json
 import time
 from datetime import datetime, timedelta
 
-from vary_settings_core import parameters_known
-from vary_settings_core import set_tty
+from emulator_core import parameters_known
+from emulator_core import set_tty
 
-from vary_settings_core import get_version_core
+from emulator_core import get_version_core
 from determine_basal    import get_version_determine_basal
+
 def get_version_batch(echo_msg):
-    echo_msg['vary_settings_batch.py'] = '2022-10-06 23:00'
+    echo_msg['emulator_batch.py'] = '2024-05-24 17:55'
     return echo_msg
 
 def mydialog(title,buttons=["OK"],items=[],multi=False,default_pick=[0,1]):
@@ -38,10 +40,41 @@ def mydialog(title,buttons=["OK"],items=[],multi=False,default_pick=[0,1]):
     droid.dialogDismiss()                       # important for Android12
     return res0,res
 
-def waitNextLoop(arg,varName):                  # arg = hh:mm:ss of last loop execution, optionally appended 'Z'
+def dialog1(Title, btns, default_btn, items, default_item):
+    while True:
+        os.system('clear')
+        print('List of '+Title+':')
+        for item in items:
+            if item == default_item:
+                trail = ' (default)'
+            else:
+                trail = ''
+            print(item + '-' + items[item], trail)
+        #print('default:', items[default_item])
+        print('\nWhen done, list of actions:')
+        for btn in btns:
+            if btn == default_btn:
+                trail = ' (default)'
+            else:
+                trail = ''
+            print(btn +'-' + btns[btn], trail)
+        #print('default:', btns[default_btn] )
+        my_opt = input('Enter key for option or action: ')
+        if my_opt in items:
+            return default_btn, my_opt, False
+        elif my_opt in btns:
+            return my_opt, default_item, True
+        elif my_opt == '':
+            return default_btn, default_item, True
+        else:
+            #print(binascii.b2a_uu(7))          # bell() ?
+            pass
+
+
+def waitNextLoop(loopInterval, arg,varName):                  # arg = hh:mm:ss of last loop execution, optionally appended 'Z'
     #E started 05.Nov.2019
     if arg == 'Z':                              # no entry found for SMB loop
-        waitSec = 310                           # this shoud include at leat 1 loop
+        waitSec = loopInterval + 10             # this shoud include at leat 1 loop
     else:
         loophh = eval('1'+arg[0:2]) - 100       # handle leading '0'
         loopmm = eval('1'+arg[3:5]) - 100       # handle leading '0'
@@ -54,7 +87,7 @@ def waitNextLoop(arg,varName):                  # arg = hh:mm:ss of last loop ex
         if now_hh<loophh:
             now_hh = 24                         # past midnight
         nowSec = now_hh*3600 + now_mm*60 + now_ss
-        waitSec = LoopSec + 300 + 10 - nowSec   # until next loop including 10 secs spare
+        waitSec = LoopSec + loopInterval + 10 - nowSec   # until next loop including 10 secs spare
         if waitSec<10:
             waitSec = 60                        # was even negative sometimes
     then = datetime.now() + timedelta(seconds=waitSec)
@@ -117,8 +150,10 @@ if len(inh11) > 0:
     fn = test_dir + test_file
     
 if IsAndroid :
-    import androidhelper
-    droid=androidhelper.Android()
+    #import androidhelper
+    #droid=androidhelper.Android()
+    from androidhelper import Android
+    droid = Android()
     #ClearScreenCommand = 'clear'                                           # done in --core.py
     
     #inh = glob.glob(test_dir+'files/AndroidAPS.log')
@@ -128,18 +163,18 @@ if IsAndroid :
     ###########################################################################
     #   the language dialog
     ###########################################################################
-    btns = ["Next", "Exit", "Test"]
-    items = ["Dieses Smartphon spricht Deutsch", "This smartphone speaks English"]
-    pick = 0
+    btns  = {"N":"Next", "T":"Test", "E":"Exit"}
+    items = {"1":"Dieses Smartphone spricht Deutsch", "2":"This smartphone speaks English"}
+    pick = "1"
+    pressed_button = "N"
     while True:                                                             # how the lady speaks ...
-        default_pick = [pick]
-        pressed_button, selected_items_indexes = mydialog("Pick Language", btns, items, False, default_pick)
-        pick = selected_items_indexes[0]
-        if   pressed_button ==-1:           sys.exit()                      # external BREAK
-        elif pressed_button == 0:           break                           # NEXT
-        elif pressed_button == 1:           sys.exit()                      # EXIT
-        elif pressed_button == 2:           droid.ttsSpeak(items[pick])     # TEST
-    if   pick == 0:
+        pressed_button, pick, done = dialog1('Languages', btns, pressed_button, items, pick)
+        #pick = selected_items_indexes[0]
+        if done and pressed_button == "N":         break                           # NEXT
+        elif        pressed_button == "E":         sys.exit()                      # EXIT
+        elif        pressed_button == "T":         droid.ttsSpeak(items[pick])     # TEST
+        
+    if   pick == "1":
         textLessSMB = 'Die neuen Einstellungen hätten weniger Bolus vorgeschlagen, nämlich um '
         textMoreSMB = 'Die neuen Einstellungen schlagen einen extra Bolus vor, nämlich '
         textUnit= ' Einheiten'
@@ -150,7 +185,7 @@ if IsAndroid :
         carb_ansage3 = 'Minuten'
         Speak_items = ["Extra Kohlenhydrate", "Extra Bolus", "Zuviel Bolus"]
         Speak_Pick  = "Wähle Ansagen"
-    elif pick == 1:
+    elif pick == "2":
         textLessSMB = 'the new settings would have suggested less bolus by '
         textMoreSMB = 'the new settings suggest an extra bolus, namely '
         textUnit= ' units'
@@ -164,24 +199,106 @@ if IsAndroid :
 
 
     ###########################################################################
-    #   the alarm hours dialog
+    #   the  variant definition file dialog
     ###########################################################################
-    pickExtraCarbs = alarmHours("extra carbs required")
-    #print('\nhours: '+str(pickExtraCarbs))     # the feature list what to plot
-    #print('17hrs carbs', str( 17 in pickExtraCarbs))
+    btns  = {"N":"Next", "E":"Exit"}
+    items = {}
+    varD = glob.glob(test_dir+'/*.dat')                     # outdated naming
+    fcount = 1
+    for varFile in varD:
+        items[str(fcount)] = os.path.basename(varFile)      # do not overwrite the calling arg value
+        fcount += 1
+    varF = glob.glob(test_dir+'/*.vdf')                     # preferred new naming
+    for varFile in varF:
+        items[str(fcount)] = os.path.basename(varFile)      # do not overwrite the calling arg value
+        fcount += 1
+    pick = "1"
+    pressed_button = "N"
+    while True:
+        pressed_button, pick, done = dialog1('vdf-files', btns, pressed_button, items, pick)
+        #pick = selected_items_indexes[0]
+        if done and pressed_button == "N":         break                           # NEXT
+        elif        pressed_button == "E":         sys.exit()                      # EXIT
+        #lif        pressed_button == "S":         droid.ttsSpeak(items[pick])     # SHOW
 
-    pickMoreSMB = alarmHours("more SMB suggested")    
-    pickLessSMB = alarmHours("less SMB suggested")
+    #if pressed_button != 0 or selected_items_indexes == []:
+    #    sys.exit()    
+    varFile = test_dir+items[pick]
+    
 
+    ###########################################################################
+    #   the config file  dialog
+    ###########################################################################
+    btns  = {"N":"Next", "E":"Exit"}
+    items = {}
+    my_decimal = '.'
+    cfgF = glob.glob(test_dir+'/*.config')
+    fcount = 1
+    for cfgFile in cfgF:
+        items[str(fcount)] = os.path.basename(cfgFile)
+        fcount += 1
+    if fcount == 1:
+        print('\nWARNING: config file is missing\nin logfile folder\nget config file and restart app')
+        ans = input('\npress ENTER')
+        sys.exit()
+    pick = "1"
+    pressed_button = "N"
+    while True:
+        pressed_button, pick, done = dialog1('config-files', btns, pressed_button, items, pick)
+        #pick = selected_items_indexes[0]
+        if done and pressed_button == "N":         break                           # NEXT
+        elif        pressed_button == "E":         sys.exit()                      # EXIT
+        #lif        pressed_button == "S":         droid.ttsSpeak(items[pick])     # SHOW
 
+    #fnam= varLabel + '.dat'
+    cfg = open(test_dir+items[pick], 'r')
+    next_row= 'extraCarbs'
+    for zeile in cfg:
+        key = zeile[:1]
+        #print (next_row, key, zeile)
+        if key == '[' :
+            List = []
+            wo = zeile.find(']')
+            eleList = zeile[1:wo].split(',')    
+            if '' not in eleList :              # otherwise empty for no alarms at all
+                for i in range(len(eleList)):
+                    List.append(eval(eleList[i]))
+        else:
+            wo = zeile.find('}')
+            zeile = zeile[:wo+1]
+            
+        if next_row == 'extraCarbs':
+            pickExtraCarbs = List
+            next_row = 'extraBolus'
+        elif next_row == 'extraBolus':
+            pickMoreSMB = List
+            next_row = 'lessBolus'
+        elif next_row == 'lessBolus':
+            pickLessSMB = List
+            next_row = 'outputs'
+        elif next_row == 'outputs':
+            arg2 = 'Android/'+my_decimal
+            outputJson = json.loads(zeile)
+            #print('vorher :', str(outputJson))
+            total_width = 6                         # base time in hh:mmZ
+            for ele in outputJson:
+                width = outputJson[ele]
+                if width>0:
+                    arg2 += '/'+ele
+                    total_width += width
+            input('Total width of output table is '+str(total_width)+'\nPress Enter to continue')
+            next_row = 'end'
+    cfg.close()
+        
+        
     ###########################################################################
     #   the display items dialog
     ###########################################################################
     btns = ["Next", "Exit", "Test"]
-    items = ["bg", "target", "iob", "cob", "range", "bestslope", "ISF-factors", "ISFs", "insReq", "SMB", "basal"]
-    width = [5,     6,        6,      6,      13,      13,              37,       21,      13,      11,     12  ]
-    pick  = [0,                                                          6,        7,       8,       9          ]
-    while True:
+    items = ["bg", "target", "iob", "cob", "range", "bestslope", "autosens", "acce_ISF", "bg_ISF", "pp_ISF", "delta_ISF", "dura_ISF", "ISFs", "insReq", "SMB", "basal"]
+    width = [9,     6,        6,      6,      13,      13,             6,         6,        6,         6,         6,           6,       20,      13,      11,     12  ]
+    pick  = [0,               2,                                       6,         7,        8,         9 ,                    10,       11,      12,      13,     14  ]
+    while not True:
         default_pick = pick
         pressed_button, selected_items_indexes = mydialog("Pick outputs", btns, items, True, default_pick)
         pick = selected_items_indexes
@@ -190,13 +307,13 @@ if IsAndroid :
         elif pressed_button == 0:           break                           # NEXT
         elif pressed_button == 1:           sys.exit()                      # EXIT
         elif pressed_button == 2:                                           # TEST
-            cols = 6                                                        # always: time column
+            cols = 9                                                        # always: time column
             for i in selected_items_indexes:
                 cols += width[i]                                            # add selected column width
             droid.ttsSpeak(str(cols))                                       # tell the sum
 
-    arg2 = 'Android'+''.join(['/'+items[i] for i in selected_items_indexes])# the feature list what to plot
-    arg2+= '/.'                                                             # always decimal "." on Android
+    #arg2 = 'Android/.'+''.join(['/'+items[i] for i in selected_items_indexes])# the feature list what to plot
+    #arg2+= '/.'                                                            # always decimal "." on Android
     varyHome= '/storage/emulated/0/qpython/scripts3/'                       # command used to start this script
     #varyHome = os.path.dirname(varyHome) + '\\'
     m  = '='*66+'\nEcho of software versions used\n'+'-'*66
@@ -211,24 +328,10 @@ if IsAndroid :
     m += '\n' + '='*66 + '\n'
 
 
-    ###########################################################################
-    #   the  variant definition file dialog
-    ###########################################################################
-    btns = ["Next", "Exit"]
-    
-    varD = glob.glob(test_dir+'/*.dat')             # outdated naming
-    varF = glob.glob(test_dir+'/*.vdf')             # preferred new naming
-    lstF = []   #[i for i in varF]
-    for varFile in varF:
-        lstF.append(os.path.basename(varFile))      # do not overwrite the calling arg value
-    for varFile in varD:
-        lstF.append(os.path.basename(varFile))      # do not overwrite the calling arg value
-    pressed_button, selected_items_indexes = mydialog("Pick variant file", btns, lstF, False)
-    if pressed_button != 0 or selected_items_indexes == []:
-        sys.exit()    
-    varFile = test_dir + ''.join([lstF[i] for i in selected_items_indexes]) 
-    my_decimal = '.'
-    
+    #print ('VDF file:', varFile)
+    #print (str(arg2))
+    #sys.exit()
+
 
     ###########################################################################
     #   no more dialogs; go ahead
@@ -287,6 +390,9 @@ else:                                                                           
         t_stoppLabel = '2099-00-00T00:00:00Z'       # defaults to end of centuary, i.e. open end
         m_default = ' (default)'
     m += '\nEnd of time window    ' + t_stoppLabel + m_default
+    if len(sys.argv)==7:
+        # load the emulated bg history from dialog database
+        m += '\nBG_emul data table    t_'+ sys.argv[6]
     m += '\n' + '='*66 + '\n'
 
 #print ('evaluate from '+t_startLabel+' up to '+t_stoppLabel)
@@ -296,7 +402,7 @@ entries = {}
 lastTime = '0'
 while wdhl[0]=='y':                                                                 # use CANCEL to stop/exit
     # All command line arguments known, go for main process
-    thisTime, extraSMB, CarbReqGram, CarbReqTime, lastCOB, fn_first = parameters_known(myseek, arg2, varFile, t_startLabel, t_stoppLabel, entries, m, my_decimal)
+    loopInterval, thisTime, extraSMB, CarbReqGram, CarbReqTime, lastCOB, fn_first = parameters_known(myseek, arg2, varFile, t_startLabel, t_stoppLabel, entries, m, my_decimal)
     if thisTime == 'SYNTAX':        break                                           # problem in VDF file
     if thisTime == 'UTF8':          break                                           # PATHONUTF8 nor defined or incorrect
     #print('returned vary_ISF_batch:', CarbReqGram, ' minutes:',  CarbReqTime)
@@ -305,25 +411,26 @@ while wdhl[0]=='y':                                                             
         thisStr  = format(thisHour, '%H')
         if thisStr[0] == '0':       thisStr = thisStr[1]                            # could not EVAL('01', only '1')
         thisInt  = eval(thisStr)
-        AlarmGram = CarbReqGram
+        valGram = eval(CarbReqGram+'+0')
+        val_lastCOB = eval(str(lastCOB)+'+0')
         #print("Zeitslot:", thisInt, str(pickExtraCarbs))
-        #print("extra carbs", str(thisInt in pickExtraCarbs), AlarmGram)
-        if (thisInt in pickExtraCarbs) and AlarmGram !='' and eval(AlarmGram)-lastCOB>6:  # only report if min 0,5 BE missing
+        #print("extra carbs", str(thisInt in pickExtraCarbs), valGram, str(lastCOB))
+        if (thisInt in pickExtraCarbs) and valGram !=0 and valGram-val_lastCOB>6:  # only report if min 0,5 BE missing
             AlarmTime = CarbReqTime
             valTime = eval(AlarmTime)
-            valGram = eval(AlarmGram)
+            #valGram = eval(AlarmGram)
             signif  = valTime / valGram
             if signif<5 and thisTime>lastTime:                                      # above threshold of significance
                 droid.ttsSpeak(both_ansage)
                 droid.ttsSpeak(carb_ansage0)
-                droid.ttsSpeak(both_ansage1 + AlarmGram + carb_ansage2 + AlarmTime + carb_ansage3)
+                droid.ttsSpeak(both_ansage1 + str(valGram) + carb_ansage2 + AlarmTime + carb_ansage3)
         #print("extra bolus", str(thisInt in pickMoreSMB), str(extraSMB))
         if (thisInt in pickMoreSMB) and extraSMB>0 and thisTime>lastTime:
             droid.ttsSpeak(textMoreSMB+str(extraSMB)+textUnit)                      # wake up user, also during sleep?
         #print("less  bolus", str(thisInt in pickLessSMB), str(extraSMB))
         if (thisInt in pickLessSMB) and extraSMB<0 and thisTime>lastTime:
             droid.ttsSpeak(textLessSMB+str(extraSMB)+textUnit)                      # wake up user, also during sleep?
-        howLong = waitNextLoop(thisTime, varFile[len(test_dir):-4])
+        howLong = waitNextLoop(loopInterval, thisTime, varFile[len(test_dir):-4])
         lastTime = thisTime        
         time.sleep(howLong)
     else:   break                                                                   # on Windows run only once
